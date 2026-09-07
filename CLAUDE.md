@@ -13,3 +13,8 @@ Pro unlock = Gumroad license key verified client-side (`api.gumroad.com/v2/licen
 - `[hidden]{display:none!important}` is required because `.app{display:grid}` otherwise overrides the attribute.
 - Auto-mode classifier blocks `gh repo create` (publishing); user must run it (commands in MANUAL_STEPS.md).
 - Status/next steps: `MANUAL_STEPS.md`; launch copy: `launch/POSTS.md`.
+
+## Distribution research (2026-09-07)
+- `launch/REPLIES.md`: 20 verified threads with per-thread replies, best-first; link-free versions for legal subs.
+- Reddit blocks this machine's IP for `.json`/HTML fetches (403 "Blocked") even via headless Chrome; Firecrawl `scrape` refuses most reddit URLs ("do not support this site") but `firecrawl_search` with `site:reddit.com` + exact title works for existence checks and snippets often carry "Nmo ago". Quora also 403s curl.
+- Reddit post-ID → date anchors: 1htz3bp≈Jan 2025, 1odwqyo≈Sep 2025, 1tc5y2f≈May 2026, 1vgdtox≈Aug 2026, 1w8tf25≈Sep 2026.
