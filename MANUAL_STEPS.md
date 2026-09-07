@@ -1,6 +1,16 @@
-# What only you can do (≈15 minutes)
+# What only you can do (≈20 minutes)
 
-Everything else is built, tested and deployed. These steps need your identity.
+Everything is built and tested locally. Claude Code's permission classifier blocked creating the public GitHub repo, so publishing is your first step.
+
+## 0. Publish to GitHub Pages (3 min)
+```bash
+cd ~/Documents/whatsapp-chat-to-pdf
+gh repo create jbarca/whatsapp-chat-to-pdf --public --source=. --remote=origin --push \
+  --description "Convert a WhatsApp chat export to PDF entirely in your browser. Nothing is uploaded."
+gh api -X POST repos/jbarca/whatsapp-chat-to-pdf/pages -f "source[branch]=main" -f "source[path]=/"
+```
+After ~1 minute: https://jbarca.github.io/whatsapp-chat-to-pdf/ — click "Try it with a sample chat" to confirm it works.
+(Or paste these into this Claude session as `! <command>` and it will carry on from there.)
 
 ## 1. Create the Gumroad product (5 min)
 1. https://gumroad.com → sign up / log in (email is enough; add payout details later, sales register immediately).
