@@ -1,5 +1,6 @@
 :root{--g:#128c7e;--g2:#25d366;--bg:#f6f7f9;--ink:#1b1f23;--muted:#6b7280;--line:#e5e7eb;--card:#fff;--me:#dcf8c6;--them:#fff;--sys:#fff5cc;--radius:12px}
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html{scroll-behavior:smooth}
 body{margin:0;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--ink);background:var(--bg)}
 a{color:var(--g)}
