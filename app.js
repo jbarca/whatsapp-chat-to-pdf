@@ -4,9 +4,9 @@
 
   // ===== CONFIG — fill these in after creating the Gumroad product (see MANUAL_STEPS.md) =====
   const CONFIG = {
-    GUMROAD_PRODUCT_ID: '',                 // Gumroad → product → Advanced → "Product ID" (needed for license verification)
-    GUMROAD_PRODUCT_URL: '',                // e.g. https://jbarca.gumroad.com/l/whatsapp-pdf
-    PRICE_LABEL: '',                        // e.g. "$4.99 one-time"
+    GUMROAD_PRODUCT_ID: 'neMRa145rAn847uAh5LgBw==',                 // Gumroad → product → Advanced → "Product ID" (needed for license verification)
+    GUMROAD_PRODUCT_URL: 'https://jbarca.gumroad.com/l/whatsapp-to-pdf',                // e.g. https://jbarca.gumroad.com/l/whatsapp-pdf
+    PRICE_LABEL: '$4.99 one-time payment',                        // e.g. "$4.99 one-time"
     FREE_LIMIT: 100,
     LICENSE_STORAGE_KEY: 'wa2pdf.license',
   };
