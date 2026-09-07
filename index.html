@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhatsApp Chat to PDF — private, in your browser, nothing uploaded</title>
+<meta name="description" content="Convert a WhatsApp chat export (.txt or .zip) into a clean, printable PDF. Runs 100% in your browser — your messages never leave your device. Evidence mode for court, HR and insurance.">
+<meta property="og:title" content="WhatsApp Chat to PDF — private, in your browser">
+<meta property="og:description" content="Turn a WhatsApp export into a clean PDF without uploading it anywhere. Free preview, one-time Pro unlock.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧾</text></svg>">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./">🧾 WhatsApp Chat → PDF</a>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="#pro">Pro</a>
+      <a href="#faq">FAQ</a>
+      <a href="https://github.com/jbarca/whatsapp-chat-to-pdf" rel="noopener">Source</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section id="hero" class="hero">
+  <h1>Turn a WhatsApp chat export into a clean PDF.<br><span class="accent">Without uploading it anywhere.</span></h1>
+  <p class="lede">Drop the <code>.txt</code> or <code>.zip</code> you get from WhatsApp's <em>Export chat</em>. Everything runs in this browser tab — your messages never touch a server. Works for iPhone and Android exports, any language, any date format.</p>
+
+  <div id="drop" class="drop" tabindex="0" role="button" aria-label="Choose a WhatsApp export file">
+    <input type="file" id="file" accept=".txt,.zip,text/plain,application/zip" hidden>
+    <div class="drop-inner">
+      <div class="drop-icon">📂</div>
+      <div><strong>Drop your export here</strong> or click to choose</div>
+      <div class="muted">WhatsApp → chat → ⋮ / ⓘ → Export chat → .txt or .zip (with media)</div>
+    </div>
+  </div>
+  <p class="tiny"><a href="?sample=1">No export handy? Try it with a sample chat →</a></p>
+  <p class="tiny muted">Privacy check: open DevTools → Network tab while you convert. You'll see zero requests with your data. <a href="https://github.com/jbarca/whatsapp-chat-to-pdf" rel="noopener">The code is public.</a></p>
+</section>
+
+<section id="app" class="app" hidden>
+  <aside class="panel">
+    <h2 id="chat-title" class="chat-title">Chat</h2>
+    <div id="stats" class="stats"></div>
+    <div id="warnings" class="warnings"></div>
+
+    <label>Document title
+      <input type="text" id="opt-title" placeholder="e.g. Chat with Alice">
+    </label>
+
+    <label>I am (messages shown on the right)
+      <select id="opt-me"><option value="">— nobody / group view —</option></select>
+    </label>
+
+    <div class="row">
+      <label>From <input type="date" id="opt-from"></label>
+      <label>To <input type="date" id="opt-to"></label>
+    </div>
+
+    <label>Only messages containing
+      <input type="search" id="opt-search" placeholder="keyword (optional)">
+    </label>
+
+    <div class="row">
+      <label>Date order
+        <select id="opt-order">
+          <option value="auto">Auto-detect</option>
+          <option value="DMY">Day/Month/Year</option>
+          <option value="MDY">Month/Day/Year</option>
+          <option value="YMD">Year/Month/Day</option>
+        </select>
+      </label>
+      <label>Paper
+        <select id="opt-paper"><option value="a4">A4</option><option value="letter">US Letter</option></select>
+      </label>
+    </div>
+
+    <div class="row">
+      <label>Text size
+        <select id="opt-size"><option value="s">Small</option><option value="m" selected>Normal</option><option value="l">Large</option></select>
+      </label>
+      <label>Style
+        <select id="opt-style"><option value="bubbles">Chat bubbles</option><option value="plain">Plain transcript</option></select>
+      </label>
+    </div>
+
+    <fieldset class="pro-box">
+      <legend>Pro <span id="pro-state" class="badge">locked</span></legend>
+      <label class="check"><input type="checkbox" id="opt-media"> Embed photos from the .zip</label>
+      <label class="check"><input type="checkbox" id="opt-evidence"> Evidence mode <span class="muted">(numbered messages, seconds, cover page with SHA-256, page headers)</span></label>
+      <label class="check"><input type="checkbox" id="opt-nowm" checked disabled> No watermark, unlimited messages</label>
+      <div id="pro-cta" class="pro-cta">
+        <a id="buy" class="btn btn-buy" href="#pro" target="_blank" rel="noopener">Unlock Pro — one-time</a>
+        <details>
+          <summary>Already bought? Enter license key</summary>
+          <form id="license-form" class="license">
+            <input type="text" id="license-key" placeholder="XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX" autocomplete="off" spellcheck="false">
+            <button type="submit" class="btn">Activate</button>
+            <div id="license-msg" class="tiny"></div>
+          </form>
+        </details>
+      </div>
+    </fieldset>
+
+    <button id="export" class="btn btn-primary big">Save as PDF</button>
+    <p class="tiny muted">Opens your browser's print dialog. Choose <strong>Save as PDF</strong> as the destination. Tip: turn on "Background graphics" for bubble colours.</p>
+    <button id="reset" class="btn btn-ghost">Start over</button>
+  </aside>
+
+  <div class="preview">
+    <div id="free-notice" class="notice" hidden></div>
+    <div id="doc" class="doc"></div>
+  </div>
+</section>
+
+<section id="how" class="info">
+  <h2>How it works</h2>
+  <ol>
+    <li><strong>Export from WhatsApp.</strong> Open the chat → tap the name (iPhone) or ⋮ menu (Android) → <em>Export chat</em>. Choose <em>Attach media</em> if you want photos in the PDF.</li>
+    <li><strong>Drop the file here.</strong> The <code>.txt</code> or <code>.zip</code> is parsed by JavaScript in this tab. Nothing is uploaded — there is no server.</li>
+    <li><strong>Tune and save.</strong> Pick who "you" are, filter by date or keyword, then <em>Save as PDF</em> from the print dialog.</li>
+  </ol>
+</section>
+
+<section id="pro" class="info pro-section">
+  <h2>Free vs Pro</h2>
+  <div class="tiers">
+    <div class="tier">
+      <h3>Free</h3>
+      <ul>
+        <li>First 100 messages</li>
+        <li>Preview watermark</li>
+        <li>All formats, filters and styles</li>
+        <li>100% private, always</li>
+      </ul>
+    </div>
+    <div class="tier tier-pro">
+      <h3>Pro <span class="price" id="price">one-time</span></h3>
+      <ul>
+        <li><strong>Unlimited messages</strong>, no watermark</li>
+        <li><strong>Photos embedded</strong> from a .zip export</li>
+        <li><strong>Evidence mode</strong>: numbered messages, timestamps to the second, cover page with participants, date range and SHA-256 of the source file, page headers and numbers — the format lawyers, HR and insurers ask for</li>
+        <li>Use it on as many chats as you like, forever</li>
+      </ul>
+      <a id="buy2" class="btn btn-buy big" href="#" target="_blank" rel="noopener">Unlock Pro</a>
+      <p class="tiny muted">Instant license key by email. Still runs entirely in your browser — the key is only checked against the store's license API.</p>
+    </div>
+  </div>
+</section>
+
+<section id="faq" class="info">
+  <h2>FAQ</h2>
+  <details open><summary>Is my chat really not uploaded?</summary><p>Correct. This page is static HTML and JavaScript hosted on GitHub Pages. There is no backend to upload to. You can verify with your browser's Network tab, or read the source. The only network call the page can make is a license check when you activate Pro, and that sends just the license key.</p></details>
+  <details><summary>Can I use the PDF as evidence in court, a tribunal or an HR complaint?</summary><p>Many people do. Evidence mode produces the things reviewers usually want: unbroken sequential numbering, exact timestamps, participants, the date range, and a SHA-256 fingerprint of the original export file so you can show the PDF matches the file from your phone. Keep the original export too. This isn't legal advice — check what your jurisdiction or lawyer requires.</p></details>
+  <details><summary>Which exports are supported?</summary><p>iPhone and Android, with or without media, in any language WhatsApp ships. 12-hour and 24-hour times, day-first, month-first and year-first dates (auto-detected, with a manual override).</p></details>
+  <details><summary>The dates look swapped.</summary><p>Some exports are ambiguous (e.g. 03/04/26). Change <em>Date order</em> in the options panel.</p></details>
+  <details><summary>Photos don't show up.</summary><p>Photos are only in the export if you chose <em>Attach media</em> in WhatsApp, which gives you a <code>.zip</code>. Drop the whole zip here and tick <em>Embed photos</em> (Pro).</p></details>
+  <details><summary>Very large chats?</summary><p>Tens of thousands of messages work, but the browser print dialog can take a while to build the PDF. Use the date filter to split a huge chat into a few PDFs if it stalls.</p></details>
+  <details><summary>Refunds?</summary><p>If Pro doesn't work for your export, email the address on your receipt with the first few lines of the file (dates only, no need for content) and you'll get a fix or a refund.</p></details>
+</section>
+
+</main>
+
+<footer class="wrap foot">
+  <span>Made in Melbourne. No accounts, no tracking, no uploads.</span>
+  <a href="https://github.com/jbarca/whatsapp-chat-to-pdf" rel="noopener">Source on GitHub</a>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" crossorigin="anonymous"></script>
+<script src="parser.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
