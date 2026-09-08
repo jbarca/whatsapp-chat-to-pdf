@@ -17,18 +17,20 @@
     drop: $('drop'), file: $('file'), app: $('app'), hero: $('hero'), doc: $('doc'), notice: $('free-notice'),
     title: $('opt-title'), me: $('opt-me'), from: $('opt-from'), to: $('opt-to'), search: $('opt-search'),
     order: $('opt-order'), paper: $('opt-paper'), size: $('opt-size'), style: $('opt-style'),
-    media: $('opt-media'), evidence: $('opt-evidence'), proState: $('pro-state'), proCta: $('pro-cta'),
+    media: $('opt-media'), evidence: $('opt-evidence'), safe: $('opt-safe'), safeOptions: $('safe-options'), safeTerms: $('safe-terms'), safeAnalyse: $('safe-analyse'), safeCancel: $('safe-cancel'), safeStatus: $('safe-status'),
+    safeReview: $('safe-review'), safeReviewList: $('safe-review-list'), safeSelectAll: $('safe-select-all'), safeClearAll: $('safe-clear-all'), safeApply: $('safe-apply'), safeAck: $('safe-ack'), safeUnanalysedWrap: $('safe-unanalysed-wrap'), proState: $('pro-state'), proCta: $('pro-cta'),
     buy: $('buy'), buy2: $('buy2'), price: $('price'), licenseForm: $('license-form'), licenseKey: $('license-key'), licenseMsg: $('license-msg'),
     export: $('export'), print: $('print-chat'), download: $('download-pdf'), cancelExport: $('cancel-export'), exportStatus: $('export-status'), reset: $('reset'), chatTitle: $('chat-title'), stats: $('stats'), warnings: $('warnings'),
     loadMoreControls: $('load-more-controls'), loadMore: $('load-more'), loadAll: $('load-all'), loadStatus: $('load-status'),
   };
 
   const CHUNK_SIZE = 250;  // messages to show per chunk on screen
-  const state = { rawText: '', fileName: '', sha256: '', media: new Map(), mediaUrls: new Map(), mediaLoads: new Map(), parsed: null, pro: false, chunkIndex: 0, lastDay: '' };
+  const state = { rawText: '', fileName: '', sha256: '', media: new Map(), mediaUrls: new Map(), mediaLoads: new Map(), parsed: null, pro: false, chunkIndex: 0, lastDay: '', safe: freshSafeState() };
   let printJob = null;
   let printDocument = null;
   let downloadUrl = null;
   const nextTask = () => new Promise(resolve => setTimeout(resolve, 0));
+  function freshSafeState() { return { fingerprint: '', status: 'idle', findings: new Map(), excludedIds: new Set(), unanalysed: [], policyVersion: SafePolicy.VERSION, partialCoverage: false, worker: null }; }
 
   // ---------- Pro / licensing ----------
   function loadLicense() {
@@ -42,7 +44,7 @@
     els.proState.textContent = state.pro ? 'active' : 'locked';
     els.proState.classList.toggle('on', state.pro);
     els.proCta.hidden = state.pro;
-    els.media.disabled = els.evidence.disabled = !state.pro;
+    els.media.disabled = els.evidence.disabled = els.safe.disabled = !state.pro;
     const url = CONFIG.GUMROAD_PRODUCT_URL || '#pro';
     els.buy.href = url; els.buy2.href = url;
     if (CONFIG.PRICE_LABEL) { els.price.textContent = CONFIG.PRICE_LABEL; els.buy.textContent = 'Unlock Pro — ' + CONFIG.PRICE_LABEL; }
@@ -87,6 +89,7 @@
     if (printJob) return;
     clearDownload();
     clearPrintDocument();
+    resetSafeMode(false);
     resetMedia();
     state.fileName = file.name;
     try {
@@ -128,6 +131,7 @@
 
   // ---------- Parse ----------
   function parseAndShow() {
+    invalidateSafe('The source or date interpretation changed. Analyse again.');
     state.parsed = WAParser.parse(state.rawText, { dateOrder: els.order.value });
     state.chunkIndex = 0;
     state.lastDay = '';
@@ -145,6 +149,122 @@
     if (p.first && !els.from.value) { els.from.min = isoDate(p.first); els.to.max = isoDate(p.last); }
     render();
     window.scrollTo({ top: 0 });
+  }
+
+  // ---------- Safe Mode ----------
+  function safeCategories() { return Array.from(document.querySelectorAll('[name="safe-category"]:checked'), el => el.value); }
+  function safeFingerprint() {
+    return SafePolicy.stableFingerprint({
+      source: state.sha256, ids: currentMessages().map(m => m.id), categories: safeCategories(),
+      customTerms: SafePolicy.customTerms(els.safeTerms.value), media: !!els.media.checked,
+    });
+  }
+  function safeReady() { return !els.safe.checked || (state.safe.status === 'applied' && state.safe.fingerprint === safeFingerprint()); }
+  function updateSafeExportState() {
+    const blocked = !!(state.parsed && els.safe.checked && !safeReady());
+    els.export.disabled = blocked; els.print.disabled = blocked;
+    if (blocked && !state.safe.worker) els.exportStatus.textContent = 'Safe mode export is blocked until the current scan is reviewed and applied.';
+    else if (!blocked && /^Safe mode export is blocked/.test(els.exportStatus.textContent)) els.exportStatus.textContent = '';
+  }
+  function invalidateSafe(message) {
+    if (state.safe.worker) { state.safe.worker.terminate(); state.safe.worker = null; }
+    state.safe.fingerprint = ''; state.safe.status = els.safe && els.safe.checked ? 'stale' : 'idle';
+    state.safe.findings.clear(); state.safe.excludedIds.clear(); state.safe.unanalysed = [];
+    if (els.safeStatus && els.safe.checked) els.safeStatus.textContent = message || 'Options changed. Analyse again before exporting.';
+    if (state.parsed) { updateSafeExportState(); render(); }
+  }
+  function resetSafeMode(uncheck) {
+    if (state.safe && state.safe.worker) state.safe.worker.terminate();
+    state.safe = freshSafeState();
+    if (uncheck && els.safe) els.safe.checked = false;
+    if (els.safeOptions) els.safeOptions.hidden = !els.safe.checked;
+    if (els.safeStatus) els.safeStatus.textContent = '';
+    updateSafeExportState();
+  }
+  function safeFailure(message) {
+    state.safe.status = 'error'; state.safe.worker = null;
+    els.safeCancel.hidden = true; els.safeAnalyse.disabled = false;
+    els.safeStatus.replaceChildren(document.createTextNode(`Safe mode failed: ${message} `));
+    const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'link-button'; retry.textContent = 'Retry'; retry.onclick = startSafeScan;
+    const disable = document.createElement('button'); disable.type = 'button'; disable.className = 'link-button'; disable.textContent = 'Disable Safe mode'; disable.onclick = () => { els.safe.checked = false; els.safe.dispatchEvent(new Event('change')); };
+    els.safeStatus.append(retry, document.createTextNode(' · '), disable);
+    updateSafeExportState();
+  }
+  async function startSafeScan() {
+    if (!state.pro || !state.parsed || state.safe.worker) return;
+    if (!window.Worker || !window.WebAssembly) { safeFailure('This browser does not support the required on-device worker and WebAssembly features.'); return; }
+    invalidateSafe('Starting analysis…');
+    const fingerprint = safeFingerprint(), messages = currentMessages();
+    state.safe.status = 'scanning';
+    els.safeAnalyse.disabled = true; els.safeCancel.hidden = false; els.safeCancel.disabled = false;
+    els.safeStatus.textContent = `Preparing to screen ${messages.length.toLocaleString()} messages…`;
+    const worker = new Worker('safe-worker.js'); state.safe.worker = worker;
+    let ready = false;
+    const timeout = setTimeout(() => { if (!ready && state.safe.worker === worker) { worker.terminate(); safeFailure('The screening worker did not start.'); } }, 45000);
+    worker.onerror = event => { event.preventDefault(); clearTimeout(timeout); worker.terminate(); if (state.safe.worker === worker) safeFailure(event.message || 'The worker stopped unexpectedly.'); };
+    worker.onmessageerror = () => { worker.terminate(); if (state.safe.worker === worker) safeFailure('The browser could not receive screening results.'); };
+    worker.onmessage = async ({ data }) => {
+      if (state.safe.worker !== worker) return;
+      if (data.type === 'ready') {
+        ready = true; clearTimeout(timeout);
+        worker.postMessage({ type: 'analyse', messages, categories: safeCategories(), customTerms: els.safeTerms.value, scanImages: els.media.checked && safeCategories().includes('images') });
+      } else if (data.type === 'progress') els.safeStatus.textContent = data.message;
+      else if (data.type === 'image-request') {
+        try {
+          const entry = state.media.get(data.name), buffer = entry ? await entry.async('arraybuffer') : null;
+          if (state.safe.worker === worker) worker.postMessage({ type: 'image-response', buffer }, buffer ? [buffer] : []);
+        } catch (e) { if (state.safe.worker === worker) worker.postMessage({ type: 'image-response', buffer: null }); }
+      } else if (data.type === 'complete') {
+        worker.terminate(); state.safe.worker = null;
+        state.safe.status = 'review'; state.safe.fingerprint = fingerprint; state.safe.policyVersion = data.policyVersion;
+        state.safe.unanalysed = data.unanalysed || []; state.safe.partialCoverage = !!data.partialCoverage;
+        state.safe.findings = new Map();
+        for (const finding of data.findings || []) {
+          if (!state.safe.findings.has(finding.messageId)) state.safe.findings.set(finding.messageId, []);
+          state.safe.findings.get(finding.messageId).push(finding);
+        }
+        els.safeAnalyse.disabled = false; els.safeCancel.hidden = true;
+        const engine = data.device === 'wasm' ? ' Used the single-threaded WASM fallback.' : data.device === 'webgpu' ? ' Used WebGPU.' : ' Used deterministic local rules.';
+        els.safeStatus.textContent = `${state.safe.findings.size.toLocaleString()} messages flagged for review.` + (data.partialCoverage ? ' Non-English text has partial coverage.' : '') + engine;
+        openSafeReview(); updateSafeExportState();
+      } else if (data.type === 'error') { clearTimeout(timeout); worker.terminate(); safeFailure(data.message || 'Unknown model error.'); }
+    };
+  }
+  function openSafeReview() {
+    els.safeReviewList.replaceChildren(); els.safeAck.checked = false;
+    const messages = state.parsed.messages;
+    for (const [id, findings] of state.safe.findings) {
+      const m = messages.find(x => x.id === id); if (!m) continue;
+      const index = messages.indexOf(m), item = document.createElement('article'); item.className = 'review-item';
+      const label = document.createElement('label'); label.className = 'review-choice';
+      const check = document.createElement('input'); check.type = 'checkbox'; check.name = 'safe-remove'; check.value = id; check.checked = state.safe.status === 'applied' ? state.safe.excludedIds.has(id) : true;
+      const summary = document.createElement('span'); summary.textContent = `Remove · ${fmtDateTime(m.date, m.hasSeconds)} · ${m.sender || 'System'}`; label.append(check, summary); item.appendChild(label);
+      const reasons = document.createElement('div'); reasons.className = 'review-reasons'; reasons.textContent = findings.map(f => `${SafePolicy.LABELS[f.category] || f.category}: ${f.reason}`).join(' · '); item.appendChild(reasons);
+      const text = document.createElement('blockquote'); text.textContent = m.text || '(attachment only)'; item.appendChild(text);
+      const around = [messages[index - 1], messages[index + 1]].filter(Boolean).map(x => `${x.sender || 'System'}: ${x.text || '(attachment)'}`).join('\n');
+      if (around) { const context = document.createElement('pre'); context.className = 'review-context'; context.textContent = around; item.appendChild(context); }
+      const imageFinding = findings.find(f => f.attachment);
+      if (imageFinding) {
+        const entry = state.media.get(imageFinding.attachment), wrap = document.createElement('div'); wrap.className = 'safe-thumb';
+        const img = document.createElement('img'); img.alt = imageFinding.attachment; img.className = 'blurred';
+        if (entry) objectUrl(imageFinding.attachment, entry).then(url => { img.src = url; }).catch(() => img.remove());
+        const reveal = document.createElement('button'); reveal.type = 'button'; reveal.className = 'btn'; reveal.textContent = 'Reveal sensitive image'; reveal.onclick = () => { img.classList.remove('blurred'); reveal.remove(); };
+        wrap.append(img, reveal); item.appendChild(wrap);
+      }
+      els.safeReviewList.appendChild(item);
+    }
+    if (!state.safe.findings.size) { const p = document.createElement('p'); p.textContent = 'No messages were flagged. Apply to confirm this scan.'; els.safeReviewList.appendChild(p); }
+    els.safeUnanalysedWrap.hidden = !state.safe.unanalysed.length;
+    if (state.safe.unanalysed.length) els.safeUnanalysedWrap.append(` (${state.safe.unanalysed.join(', ')})`);
+    els.safeApply.disabled = !!state.safe.unanalysed.length;
+    els.safeReview.showModal();
+  }
+  function applySafeReview() {
+    if (state.safe.unanalysed.length && !els.safeAck.checked) return;
+    state.safe.excludedIds = new Set(Array.from(els.safeReviewList.querySelectorAll('[name="safe-remove"]:checked'), x => Number(x.value)));
+    state.safe.status = 'applied'; state.safe.fingerprint = safeFingerprint();
+    els.safeReview.close(); els.safeStatus.textContent = `${state.safe.excludedIds.size.toLocaleString()} messages removed from this edited excerpt.` + (state.safe.partialCoverage ? ' Non-English text had partial screening coverage.' : '');
+    updateSafeExportState(); render();
   }
 
   // ---------- Render ----------
@@ -221,7 +341,8 @@
   // Everything the header/rows need for the current filters + tier.
   function docContext() {
     const p = state.parsed;
-    const all = currentMessages();
+    const excluded = els.safe.checked && state.safe.status === 'applied' ? state.safe.excludedIds : new Set();
+    const all = currentMessages().filter(m => !excluded.has(m.id));
     const limited = !state.pro && all.length > CONFIG.FREE_LIMIT;
     const displayMsgs = limited ? all.slice(0, CONFIG.FREE_LIMIT) : all;
     return {
@@ -429,6 +550,12 @@
   // File > Print cannot await preparation. Preserve the full text for that path too.
   window.addEventListener('beforeprint', () => {
     if (!printJob) scheduleRender.flush();
+    if (state.parsed && els.safe.checked && !safeReady()) {
+      clearPrintDocument();
+      const doc = document.createElement('article'); doc.id = 'print-doc'; doc.className = 'doc';
+      const warning = document.createElement('h1'); warning.textContent = 'Safe mode review required'; doc.appendChild(warning);
+      document.body.appendChild(doc); printDocument = doc; document.body.classList.add('print-ready'); return;
+    }
     if (!state.parsed || (printJob && printJob.ready) || (!printJob && printDocument)) return;
     // A browser-menu print during preparation must never print a partial batch.
     if (printJob) { printJob.cancelled = true; if (printJob.cancel) printJob.cancel(); }
@@ -467,6 +594,7 @@
   async function exportPdf() {
     if (!state.parsed || printJob) return;
     scheduleRender.flush();
+    if (!safeReady()) { updateSafeExportState(); return; }
     clearPrintDocument();
     clearDownload();
     const ctx = docContext();
@@ -542,6 +670,7 @@
     // Apply pending edits once, before taking the export snapshot. A delayed
     // preview render must not remove the print document in a non-blocking browser.
     scheduleRender.flush();
+    if (!safeReady()) { updateSafeExportState(); return; }
     clearPrintDocument();
     const job = { cancelled: false, ready: false, images: new Map(), urls: new Set(), imageErrors: 0 };
     printJob = job;
@@ -609,10 +738,27 @@
   // ---------- Wiring ----------
   const scheduleRender = debounce(render, 150);
   ['title', 'me', 'from', 'to', 'search', 'paper', 'size', 'style', 'media', 'evidence'].forEach(k => els[k].addEventListener(k === 'search' || k === 'title' ? 'input' : 'change', scheduleRender));
+  ['from', 'to', 'search', 'media'].forEach(k => els[k].addEventListener(k === 'search' ? 'input' : 'change', () => invalidateSafe('Selection changed. Analyse again before exporting.')));
+  els.safe.addEventListener('change', () => {
+    if (els.safe.checked) { els.evidence.checked = false; els.safeOptions.hidden = false; invalidateSafe('Choose categories, then analyse the current selection.'); }
+    else { resetSafeMode(false); els.safeOptions.hidden = true; render(); }
+  });
+  els.evidence.addEventListener('change', () => { if (els.evidence.checked && els.safe.checked) { els.safe.checked = false; resetSafeMode(false); els.safeOptions.hidden = true; } });
+  document.querySelectorAll('[name="safe-category"]').forEach(el => el.addEventListener('change', () => invalidateSafe('Categories changed. Analyse again before exporting.')));
+  els.safeTerms.addEventListener('input', () => invalidateSafe('Custom terms changed. Analyse again before exporting.'));
+  els.safeAnalyse.addEventListener('click', () => ['review', 'applied'].includes(state.safe.status) ? openSafeReview() : startSafeScan());
+  els.safeCancel.addEventListener('click', () => {
+    if (!state.safe.worker) return; state.safe.worker.postMessage({ type: 'cancel' }); state.safe.worker.terminate(); state.safe.worker = null;
+    state.safe.status = 'stale'; els.safeCancel.hidden = true; els.safeAnalyse.disabled = false; els.safeStatus.textContent = 'Analysis cancelled. Analyse again before exporting.'; updateSafeExportState();
+  });
+  els.safeSelectAll.addEventListener('click', () => els.safeReviewList.querySelectorAll('[name="safe-remove"]').forEach(x => { x.checked = true; }));
+  els.safeClearAll.addEventListener('click', () => els.safeReviewList.querySelectorAll('[name="safe-remove"]').forEach(x => { x.checked = false; }));
+  els.safeAck.addEventListener('change', () => { els.safeApply.disabled = state.safe.unanalysed.length && !els.safeAck.checked; });
+  els.safeApply.addEventListener('click', applySafeReview);
   els.order.addEventListener('change', () => { if (!printJob) parseAndShow(); });
   els.export.addEventListener('click', exportPdf);
   els.print.addEventListener('click', printChat);
-  els.reset.addEventListener('click', () => { clearDownload(); clearPrintDocument(); resetMedia(); state.parsed = null; state.rawText = ''; els.file.value = ''; els.title.value = ''; els.from.value = ''; els.to.value = ''; els.search.value = ''; els.exportStatus.textContent = ''; els.app.hidden = true; els.hero.hidden = false; });
+  els.reset.addEventListener('click', () => { clearDownload(); clearPrintDocument(); resetMedia(); resetSafeMode(true); state.parsed = null; state.rawText = ''; els.file.value = ''; els.title.value = ''; els.from.value = ''; els.to.value = ''; els.search.value = ''; els.exportStatus.textContent = ''; els.app.hidden = true; els.hero.hidden = false; });
   function debounce(fn, ms) {
     let timer = null;
     const run = () => { timer = null; fn(); };

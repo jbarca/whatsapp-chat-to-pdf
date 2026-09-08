@@ -19,7 +19,7 @@ const count = Number(process.env.PDF_TEST_MESSAGES || 1000);
 assert.ok(Number.isInteger(count) && count >= 1000);
 const server = createServer(async (req, res) => {
   const path = req.url.split('?')[0];
-  const types = { '/': 'text/html', '/app.js': 'text/javascript', '/parser.js': 'text/javascript', '/styles.css': 'text/css' };
+  const types = { '/': 'text/html', '/app.js': 'text/javascript', '/parser.js': 'text/javascript', '/safe-policy.js': 'text/javascript', '/styles.css': 'text/css' };
   if (!types[path]) { res.writeHead(404); res.end(); return; }
   res.setHeader('Content-Type', types[path]);
   res.end(await readFile(join(root, path === '/' ? 'index.html' : path.slice(1))));

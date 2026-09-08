@@ -8,10 +8,10 @@ Convert a WhatsApp "Export chat" file (`.txt` or `.zip` with media) into a clean
 - iPhone and Android exports, any language; 12/24-hour times; day-first, month-first or year-first dates (auto-detected, overridable)
 - Chat-bubble or plain-transcript layout, "I am …" alignment, date-range and keyword filters, A4/Letter
 - Direct PDF downloads in a cancellable background worker, with progress and photos sized for printing; no browser print prompt is needed
-- **Pro (one-time unlock):** unlimited messages, no watermark, embedded photos from a `.zip`, and *Evidence mode* — sequential message numbers, timestamps to the second, cover page with participants, date range and SHA-256 of the source, running page headers and numbers
+- **Pro (one-time unlock):** unlimited messages, no watermark, embedded photos, Evidence mode, and on-device Safe Mode screening with review-before-export
 
 ## Privacy
-The page is static HTML/JS on GitHub Pages. Parsing happens in `parser.js`, preview rendering in `app.js`, and direct PDF creation in `pdf-worker.js`. PDF code and fonts are served with the site; messages and photos never leave the device. ZIP support loads JSZip from a CDN. Activating Pro sends only the license key to Gumroad's public license API.
+The page is static HTML/JS on GitHub Pages. Parsing happens in `parser.js`, preview rendering in `app.js`, and direct PDF creation in `pdf-worker.js`. PDF code, Safe Mode runtime, and fonts are served with the site; messages and photos never leave the device. Safe Mode downloads only pinned model assets using GET requests and caches them in the browser. ZIP support loads JSZip from a CDN. Activating Pro sends only the license key to Gumroad's public license API.
 
 **Save as PDF** downloads a file directly. A download link remains available if automatic downloading is blocked. **Print…** and Ctrl/Cmd+P retain browser printing. Direct PDFs use embedded text; complex scripts and emoji use browser-rendered line images with a searchable Unicode text layer. Pagination can differ from the browser print layout.
 

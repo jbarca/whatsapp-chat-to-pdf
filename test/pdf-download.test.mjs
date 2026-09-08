@@ -18,7 +18,7 @@ const count = Number(process.env.PDF_TEST_MESSAGES || 1000);
 assert.ok(Number.isInteger(count) && count >= 1000);
 const files = new Map([
   ['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']],
-  ['/parser.js', ['parser.js', 'text/javascript']], ['/styles.css', ['styles.css', 'text/css']],
+  ['/parser.js', ['parser.js', 'text/javascript']], ['/safe-policy.js', ['safe-policy.js', 'text/javascript']], ['/styles.css', ['styles.css', 'text/css']],
   ['/pdf-worker.js', ['pdf-worker.js', 'text/javascript']],
   ['/vendor/jspdf-4.2.1.umd.min.js', ['vendor/jspdf-4.2.1.umd.min.js', 'text/javascript']],
   ['/vendor/NotoSans-Regular.ttf', ['vendor/NotoSans-Regular.ttf', 'font/ttf']],

@@ -93,6 +93,20 @@
       <legend>Pro <span id="pro-state" class="badge">locked</span></legend>
       <label class="check"><input type="checkbox" id="opt-media"> Embed photos from the .zip</label>
       <label class="check"><input type="checkbox" id="opt-evidence"> Evidence mode <span class="muted">(numbered messages, seconds, cover page with SHA-256, page headers)</span></label>
+      <label class="check"><input type="checkbox" id="opt-safe"> Safe mode <span class="muted">(on-device potential-risk screening)</span></label>
+      <div id="safe-options" class="safe-options" hidden>
+        <p class="tiny">Potential-risk screening only—not a guarantee or legal determination. Models download once (approximately 300 MB) and run on this device.</p>
+        <label class="check"><input type="checkbox" name="safe-category" value="abuse" checked> Abuse, hate, and threats</label>
+        <label class="check"><input type="checkbox" name="safe-category" value="sexual" checked> Sexual or explicit content</label>
+        <label class="check"><input type="checkbox" name="safe-category" value="violence" checked> Violence or self-harm</label>
+        <label class="check"><input type="checkbox" name="safe-category" value="drugs" checked> Drugs or weapons</label>
+        <label class="check"><input type="checkbox" name="safe-category" value="crime" checked> Crime, fraud, or admissions/planning</label>
+        <label class="check"><input type="checkbox" name="safe-category" value="images" checked> Sensitive images</label>
+        <label>Custom words or phrases<textarea id="safe-terms" rows="3" placeholder="One per line"></textarea></label>
+        <button type="button" id="safe-analyse" class="btn">Analyse selected messages</button>
+        <button type="button" id="safe-cancel" class="btn btn-ghost" hidden>Cancel analysis</button>
+        <p id="safe-status" class="tiny muted" role="status" aria-live="polite"></p>
+      </div>
       <label class="check"><input type="checkbox" id="opt-nowm" checked disabled> No watermark, unlimited messages</label>
       <div id="pro-cta" class="pro-cta">
         <a id="buy" class="btn btn-buy" href="#pro" target="_blank" rel="noopener">Unlock Pro — one-time</a>
@@ -127,6 +141,19 @@
   </div>
 </section>
 
+<dialog id="safe-review" class="safe-review" aria-labelledby="safe-review-title">
+  <form method="dialog">
+    <div class="review-head">
+      <div><h2 id="safe-review-title">Review flagged messages</h2><p class="tiny">Checked messages will be removed. The exported result is an edited excerpt.</p></div>
+      <button value="cancel" class="btn btn-ghost" aria-label="Close review">Close</button>
+    </div>
+    <div class="review-actions"><button type="button" id="safe-select-all" class="btn">Select all</button><button type="button" id="safe-clear-all" class="btn">Clear all</button></div>
+    <div id="safe-review-list" class="review-list"></div>
+    <label id="safe-unanalysed-wrap" class="check warning" hidden><input type="checkbox" id="safe-ack"> I understand some attachments could not be analysed.</label>
+    <div class="review-foot"><button type="button" id="safe-apply" class="btn btn-primary">Apply removals</button></div>
+  </form>
+</dialog>
+
 <section id="how" class="info">
   <h2>How it works</h2>
   <ol>
@@ -154,6 +181,7 @@
         <li><strong>Unlimited messages</strong>, no watermark</li>
         <li><strong>Photos embedded</strong> from a .zip export</li>
         <li><strong>Evidence mode</strong>: numbered messages, timestamps to the second, cover page with participants, date range and SHA-256 of the source file, page headers and numbers — the format lawyers, HR and insurers ask for</li>
+        <li><strong>Safe mode</strong>: review possible risky text and images locally, then omit confirmed messages from the PDF</li>
         <li>Use it on as many chats as you like, forever</li>
       </ul>
       <a id="buy2" class="btn btn-buy big" href="#" target="_blank" rel="noopener">Unlock Pro</a>
@@ -165,6 +193,8 @@
 <section id="faq" class="info">
   <h2>FAQ</h2>
   <details open><summary>Is my chat really not uploaded?</summary><p>Correct. Your messages and photos are processed on this device. The page downloads its scripts and PDF font, but never uploads your chat. Activating Pro sends just the license key to the store. You can verify this in your browser's Network tab or read the source.</p></details>
+  <details><summary>How does Safe mode protect my privacy?</summary><p>Safe mode sends no chat content anywhere. Version-pinned, quantized screening models are downloaded with GET requests, cached by your browser, and run on this device. Findings, images and review decisions remain in memory and disappear when the page closes. Screening can miss or misclassify content and is not legal advice.</p></details>
+  <details><summary>Which models does Safe mode use?</summary><p>Transformers.js 3.8.1 with pinned revisions of a multilingual toxicity classifier, MobileBERT MNLI, and CLIP ViT-B/32. Model and runtime licence notices are listed in <a href="vendor/README.md">vendor notices</a>.</p></details>
   <details><summary>Can I use the PDF as evidence in court, a tribunal or an HR complaint?</summary><p>Many people do. Evidence mode produces the things reviewers usually want: unbroken sequential numbering, exact timestamps, participants, the date range, and a SHA-256 fingerprint of the original export file so you can show the PDF matches the file from your phone. Keep the original export too. This isn't legal advice — check what your jurisdiction or lawyer requires.</p></details>
   <details><summary>Which exports are supported?</summary><p>iPhone and Android, with or without media, in any language WhatsApp ships. 12-hour and 24-hour times, day-first, month-first and year-first dates (auto-detected, with a manual override).</p></details>
   <details><summary>The dates look swapped.</summary><p>Some exports are ambiguous (e.g. 03/04/26). Change <em>Date order</em> in the options panel.</p></details>
@@ -182,6 +212,7 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" crossorigin="anonymous"></script>
 <script src="parser.js"></script>
+<script src="safe-policy.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
