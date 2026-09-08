@@ -63,8 +63,8 @@ async function load(page, text, name = 'Large.txt') {
 async function exportChat(page) {
   const calls = await page.evaluate(() => window.__printCalls);
   const start = Date.now();
-  await page.locator('#export').dispatchEvent('click');
-  await page.waitForFunction(calls => window.__printCalls === calls + 1 && !document.getElementById('export').disabled, calls, { polling: 25 });
+  await page.locator('#print-chat').dispatchEvent('click');
+  await page.waitForFunction(calls => window.__printCalls === calls + 1 && !document.getElementById('print-chat').disabled, calls, { polling: 25 });
   return Date.now() - start;
 }
 
@@ -130,11 +130,11 @@ try {
     });
     observer.observe(document.getElementById('export-status'), { childList: true });
   });
-  await page.locator('#export').dispatchEvent('click');
+  await page.locator('#print-chat').dispatchEvent('click');
   await page.waitForFunction(() => document.getElementById('export-status').textContent === 'PDF preparation cancelled.', null, { polling: 25 });
   assert.equal(await page.evaluate(() => window.__printCalls), 1);
   assert.equal(await page.locator('#print-doc').count(), 0);
-  assert.equal(await page.locator('#export').isEnabled(), true);
+  assert.equal(await page.locator('#print-chat').isEnabled(), true);
 
   // A browser-menu print during preparation must include all messages, never one batch.
   await page.evaluate(() => {
@@ -148,8 +148,8 @@ try {
     });
     observer.observe(document.getElementById('export-status'), { childList: true });
   });
-  await page.locator('#export').dispatchEvent('click');
-  await page.waitForFunction(() => window.__menuPrintCount > 0 && !document.getElementById('export').disabled, null, { polling: 25 });
+  await page.locator('#print-chat').dispatchEvent('click');
+  await page.waitForFunction(() => window.__menuPrintCount > 0 && !document.getElementById('print-chat').disabled, null, { polling: 25 });
   assert.equal(await page.evaluate(() => window.__menuPrintCount), count);
   assert.equal(await page.locator('#print-doc').count(), 0);
 
@@ -177,14 +177,14 @@ try {
   await exportChat(page);
   assert.equal(await page.locator('#print-doc .msg').count(), 0);
   await page.evaluate(() => { window.__workingPrint = window.print; window.print = () => { throw new Error('Print unavailable'); }; });
-  await page.locator('#export').dispatchEvent('click');
+  await page.locator('#print-chat').dispatchEvent('click');
   await page.waitForFunction(() => document.getElementById('export-status').textContent.includes('Print unavailable'), null, { polling: 25 });
   assert.equal(await page.locator('#print-doc').count(), 0);
-  assert.equal(await page.locator('#export').isEnabled(), true);
+  assert.equal(await page.locator('#print-chat').isEnabled(), true);
   await page.evaluate(() => { window.print = window.__workingPrint; });
   await page.locator('#opt-search').fill('MATCH');
   await page.keyboard.press('Control+p');
-  await page.waitForFunction(() => document.getElementById('print-doc')?.querySelectorAll('.msg').length > 0 && !document.getElementById('export').disabled, null, { polling: 25 });
+  await page.waitForFunction(() => document.getElementById('print-doc')?.querySelectorAll('.msg').length > 0 && !document.getElementById('print-chat').disabled, null, { polling: 25 });
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
   await page.setViewportSize({ width: 390, height: 844 });
   await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));

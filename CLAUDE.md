@@ -1,18 +1,20 @@
 # whatsapp-chat-to-pdf — project notes
 
-Static site, no build. `index.html` + `styles.css` + `parser.js` (UMD, browser + Node) + `app.js`.
+Static site, no build. `index.html` + `styles.css` + `parser.js` (UMD, browser + Node) + `app.js` + `pdf-worker.js` + vendored PDF dependencies.
 Pro unlock = Gumroad license key verified client-side (`api.gumroad.com/v2/licenses/verify`, CORS `*` confirmed 2026-09-07). Config block at top of `app.js`.
 
 ## Rendering model (app.js, 2026-09-08)
 - Screen shows `CHUNK_SIZE` (250) messages per chunk; `renderChunk(i)` (0 replaces, >0 appends), `render()` = chunk 0. `#load-more`/`#load-all` buttons in `#load-more-controls`. Day separators continue across chunks via `state.lastDay`.
 - Shared builders: `docContext()` (filters/tier → ctx), `docHeader(ctx)`, `messageRows(msgs, ctx)`. Each context owns its day cursor; the preview saves it in `state.lastDay`. Never duplicate the row loop. Reuse the cached `Intl.DateTimeFormat` instances.
-- Print: `exportPdf()` flushes pending option edits, builds hidden `#print-doc` in 250-message batches with progress/cancellation, waits for bounded image processing and fonts, then calls `window.print()`. The preview nodes and chunk cursor stay intact. Print CSS uses block layout without bubble shadows. Photos larger than their print resolution are resized; print-only object URLs are revoked on cleanup. Unreadable photos retain labelled placeholders.
-- Ctrl/Cmd+P uses asynchronous export; browser-menu `beforeprint` builds the full text synchronously if needed. `afterprint` removes the print document; export controls recover without awaiting that event (some browsers omit it). A subsequent edit/export also removes any retained print document. Free-tier limits and tail markers apply to both preview and PDF.
+- Save: `exportPdf()` flushes edits and sends the filtered/tier-limited snapshot to `pdf-worker.js`. It creates a PDF with vendored jsPDF + Noto Sans, then downloads a Blob directly. Never call `window.print()` on this path: Edge's large-document print preview can hang. The worker handles layout/serialization, requests ZIP images one at a time, resizes/deduplicates photos, and reports progress. Cancel terminates the worker immediately. The retained download URL is revoked on a new export/edit/file/reset.
+- Unicode: vector text uses Noto Sans; unsupported/complex-script lines use OffscreenCanvas plus an invisible CID/ToUnicode text layer. Keep extraction and visual tests when changing this or upgrading jsPDF (pinned internal font hook). All font/code assets are local to the site; no transcript data is sent remotely.
+- Print: `printChat()` is the separate Print button/Ctrl/Cmd+P path. It builds hidden `#print-doc` in batches, then invokes `window.print()`. Browser-menu `beforeprint` builds full text synchronously; `afterprint` cleans up. Preview nodes/cursor stay intact. Free-tier limits and tail markers apply to both download and print.
 - Large synthetic export for perf tests: scratchpad `gen-large.js` → `large-export.txt` (30k msgs), not committed.
 
 ## Commands
 - Tests: `~/.nvm/versions/node/v26.8.1/bin/node test/parser.test.mjs` (default `node` is v14 and fails on `node:assert/strict`).
 - PDF regression: `node test/pdf-export.test.mjs` with Node 22+, Chrome, and development packages `playwright`, `jszip`, `pdfjs-dist`. Set `PDF_TEST_MESSAGES=30000` for a stress test that reads back every message from the PDF. Artifacts go to the OS temporary directory; no real chat data is used.
+- Direct download regression: `node test/pdf-download.test.mjs` defaults to installed Edge; `PDF_BROWSER=chrome` selects Chrome. `PDF_TEST_MESSAGES=30000` checks every message in the actual downloaded file, without `page.pdf()` or a print prompt.
 - Local: `python3 -m http.server 8080 --bind 127.0.0.1`; `?sample=1` loads `test/sample-ios.txt`.
 - Headless smoke test: Chrome at `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` with `--headless=new --virtual-time-budget=8000 --dump-dom|--print-to-pdf=|--screenshot=`. Pro path: temporary harness page that seeds `localStorage['wa2pdf.license']={key,ok:true}` (see session 2026-09-07; harness is not committed).
 - Verified 2026-09-07: free = 100 msgs + watermark (8-page PDF for sample); Pro evidence mode = all 351 numbered + SHA-256 cover (40 pages).

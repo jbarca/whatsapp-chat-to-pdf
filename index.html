@@ -108,9 +108,11 @@
     </fieldset>
 
     <button id="export" class="btn btn-primary big">Save as PDF</button>
+    <a id="download-pdf" class="btn" hidden>Download PDF again</a>
     <button id="cancel-export" class="btn btn-ghost" hidden>Cancel preparation</button>
     <p id="export-status" class="tiny muted" role="status" aria-live="polite"></p>
-    <p class="tiny muted">Opens your browser's print dialog. Choose <strong>Save as PDF</strong> as the destination. Tip: turn on "Background graphics" for bubble colours.</p>
+    <p class="tiny muted">Downloads directly, without opening the print dialog. Your chat stays on this device.</p>
+    <button id="print-chat" class="btn btn-ghost">Print…</button>
     <button id="reset" class="btn btn-ghost">Start over</button>
   </aside>
 
@@ -130,7 +132,7 @@
   <ol>
     <li><strong>Export from WhatsApp.</strong> Open the chat → tap the name (iPhone) or ⋮ menu (Android) → <em>Export chat</em>. Choose <em>Attach media</em> if you want photos in the PDF.</li>
     <li><strong>Drop the file here.</strong> The <code>.txt</code> or <code>.zip</code> is parsed by JavaScript in this tab. Nothing is uploaded — there is no server.</li>
-    <li><strong>Tune and save.</strong> Pick who "you" are, filter by date or keyword, then <em>Save as PDF</em> from the print dialog.</li>
+    <li><strong>Tune and save.</strong> Pick who "you" are, filter by date or keyword, then click <em>Save as PDF</em> to download the file.</li>
   </ol>
 </section>
 
@@ -162,12 +164,12 @@
 
 <section id="faq" class="info">
   <h2>FAQ</h2>
-  <details open><summary>Is my chat really not uploaded?</summary><p>Correct. This page is static HTML and JavaScript hosted on GitHub Pages. There is no backend to upload to. You can verify with your browser's Network tab, or read the source. The only network call the page can make is a license check when you activate Pro, and that sends just the license key.</p></details>
+  <details open><summary>Is my chat really not uploaded?</summary><p>Correct. Your messages and photos are processed on this device. The page downloads its scripts and PDF font, but never uploads your chat. Activating Pro sends just the license key to the store. You can verify this in your browser's Network tab or read the source.</p></details>
   <details><summary>Can I use the PDF as evidence in court, a tribunal or an HR complaint?</summary><p>Many people do. Evidence mode produces the things reviewers usually want: unbroken sequential numbering, exact timestamps, participants, the date range, and a SHA-256 fingerprint of the original export file so you can show the PDF matches the file from your phone. Keep the original export too. This isn't legal advice — check what your jurisdiction or lawyer requires.</p></details>
   <details><summary>Which exports are supported?</summary><p>iPhone and Android, with or without media, in any language WhatsApp ships. 12-hour and 24-hour times, day-first, month-first and year-first dates (auto-detected, with a manual override).</p></details>
   <details><summary>The dates look swapped.</summary><p>Some exports are ambiguous (e.g. 03/04/26). Change <em>Date order</em> in the options panel.</p></details>
   <details><summary>Photos don't show up.</summary><p>Photos are only in the export if you chose <em>Attach media</em> in WhatsApp, which gives you a <code>.zip</code>. Drop the whole zip here and tick <em>Embed photos</em> (Pro).</p></details>
-  <details><summary>Very large chats?</summary><p>PDF preparation runs in batches with progress and a cancel button. Photos are sized for printing to reduce memory use. The print dialog may still take a moment to paginate very long chats; date and keyword filters can narrow the document.</p></details>
+  <details><summary>Very large chats?</summary><p><em>Save as PDF</em> creates the file in the background and downloads it directly, bypassing slow browser print previews. Progress and cancellation stay available. Photos are sized for the PDF to reduce memory use. If your browser does not start the download automatically, use the download link that appears when it is ready. <em>Print…</em> is available separately for paper printing.</p></details>
   <details><summary>Refunds?</summary><p>If Pro doesn't work for your export, email the address on your receipt with the first few lines of the file (dates only, no need for content) and you'll get a fix or a refund.</p></details>
 </section>
 

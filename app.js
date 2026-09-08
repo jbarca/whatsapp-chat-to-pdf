@@ -19,7 +19,7 @@
     order: $('opt-order'), paper: $('opt-paper'), size: $('opt-size'), style: $('opt-style'),
     media: $('opt-media'), evidence: $('opt-evidence'), proState: $('pro-state'), proCta: $('pro-cta'),
     buy: $('buy'), buy2: $('buy2'), price: $('price'), licenseForm: $('license-form'), licenseKey: $('license-key'), licenseMsg: $('license-msg'),
-    export: $('export'), cancelExport: $('cancel-export'), exportStatus: $('export-status'), reset: $('reset'), chatTitle: $('chat-title'), stats: $('stats'), warnings: $('warnings'),
+    export: $('export'), print: $('print-chat'), download: $('download-pdf'), cancelExport: $('cancel-export'), exportStatus: $('export-status'), reset: $('reset'), chatTitle: $('chat-title'), stats: $('stats'), warnings: $('warnings'),
     loadMoreControls: $('load-more-controls'), loadMore: $('load-more'), loadAll: $('load-all'), loadStatus: $('load-status'),
   };
 
@@ -27,6 +27,7 @@
   const state = { rawText: '', fileName: '', sha256: '', media: new Map(), mediaUrls: new Map(), mediaLoads: new Map(), parsed: null, pro: false, chunkIndex: 0, lastDay: '' };
   let printJob = null;
   let printDocument = null;
+  let downloadUrl = null;
   const nextTask = () => new Promise(resolve => setTimeout(resolve, 0));
 
   // ---------- Pro / licensing ----------
@@ -84,6 +85,7 @@
 
   async function loadFile(file) {
     if (printJob) return;
+    clearDownload();
     clearPrintDocument();
     resetMedia();
     state.fileName = file.name;
@@ -238,6 +240,7 @@
   // Render one on-screen chunk. Chunk 0 replaces the document (header + first rows); later chunks append.
   function renderChunk(chunkIndex) {
     if (printJob) return;
+    if (chunkIndex === 0) clearDownload();
     clearPrintDocument();
     const p = state.parsed; if (!p) return;
     const ctx = docContext();
@@ -420,7 +423,7 @@
   // Route keyboard printing through the asynchronous preparation, including images.
   window.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p' && state.parsed) {
-      e.preventDefault(); exportPdf();
+      e.preventDefault(); printChat();
     }
   });
   // File > Print cannot await preparation. Preserve the full text for that path too.
@@ -428,7 +431,7 @@
     if (!printJob) scheduleRender.flush();
     if (!state.parsed || (printJob && printJob.ready) || (!printJob && printDocument)) return;
     // A browser-menu print during preparation must never print a partial batch.
-    if (printJob) printJob.cancelled = true;
+    if (printJob) { printJob.cancelled = true; if (printJob.cancel) printJob.cancel(); }
     const ctx = docContext();
     const doc = createPrintDocument(ctx);
     ctx.tailMarkerCount = ctx.hiddenCount;
@@ -452,8 +455,89 @@
     while ((state.chunkIndex + 1) * CHUNK_SIZE < total) renderChunk(state.chunkIndex + 1);
   });
 
-  // ---------- PDF export: prepare in batches without laying out the full chat on screen ----------
+  function clearDownload() {
+    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+    downloadUrl = null;
+    els.download.hidden = true;
+    els.download.removeAttribute('href');
+    els.exportStatus.textContent = '';
+  }
+
+  // Generate the file off the main thread. Never invoke Edge's print preview for saving.
   async function exportPdf() {
+    if (!state.parsed || printJob) return;
+    scheduleRender.flush();
+    clearPrintDocument();
+    clearDownload();
+    const ctx = docContext();
+    const job = { cancelled: false };
+    printJob = job;
+    const controls = Array.from(els.app.querySelectorAll('input, select, button')).map(el => [el, el.disabled]);
+    controls.forEach(([el]) => { el.disabled = true; });
+    els.export.textContent = 'Creating PDF…';
+    els.cancelExport.hidden = false; els.cancelExport.disabled = false;
+    els.exportStatus.textContent = 'Starting PDF generator…';
+    let worker, startupTimer;
+    try {
+      const result = await new Promise((resolve, reject) => {
+        worker = new Worker('pdf-worker.js');
+        job.cancel = () => { worker.terminate(); resolve(null); };
+        startupTimer = setTimeout(() => reject(new Error('PDF generator did not load. Check your connection and retry.')), 45000);
+        worker.onerror = event => { event.preventDefault(); reject(new Error(event.message || 'PDF worker stopped unexpectedly.')); };
+        worker.onmessageerror = () => reject(new Error('Could not receive the PDF.'));
+        worker.onmessage = async ({ data }) => {
+          if (job.cancelled) return;
+          if (data.type === 'ready') clearTimeout(startupTimer);
+          else if (data.type === 'progress') els.exportStatus.textContent = data.message;
+          else if (data.type === 'error') reject(new Error(data.message));
+          else if (data.type === 'done') resolve(data);
+          else if (data.type === 'image') {
+            // Only one photo is inflated at a time; never copy the entire ZIP to the worker.
+            try {
+              const entry = state.media.get(data.name);
+              const buffer = entry ? await entry.async('arraybuffer') : null;
+              if (!job.cancelled) worker.postMessage({ type: 'image', buffer }, buffer ? [buffer] : []);
+            } catch (err) {
+              if (!job.cancelled) worker.postMessage({ type: 'image', buffer: null });
+            }
+          }
+        };
+        const header = docHeader(ctx);
+        worker.postMessage({
+          type: 'export', messages: ctx.displayMsgs,
+          options: {
+            title: ctx.title, fileName: state.fileName, me: ctx.me, plain: ctx.plain,
+            evidence: ctx.evidence, embed: ctx.embed, limited: ctx.limited,
+            hiddenCount: ctx.hiddenCount, numWidth: ctx.numWidth,
+            paper: els.paper.value, size: els.size.value, locale: dateFormatter.resolvedOptions().locale,
+            subtitle: header.querySelector('.doc-sub')?.textContent || '',
+            cover: Array.from(header.querySelectorAll('tr'), row => Array.from(row.cells, cell => cell.textContent)),
+          },
+        });
+      });
+      if (!result || job.cancelled) return;
+      downloadUrl = URL.createObjectURL(new Blob([result.buffer], { type: 'application/pdf' }));
+      els.download.href = downloadUrl;
+      els.download.download = (ctx.title.replace(/[\x00-\x1f<>:"/\\|?*]/g, '_').slice(0, 160).trim() || 'WhatsApp chat') + '.pdf';
+      els.download.hidden = false;
+      els.download.click();
+      els.exportStatus.textContent = `PDF ready (${result.pages.toLocaleString()} ${result.pages === 1 ? 'page' : 'pages'}). Download started; use the link above if needed.`
+        + (result.imageErrors ? ` ${result.imageErrors.toLocaleString()} ${result.imageErrors === 1 ? 'photo' : 'photos'} unavailable; filenames are included.` : '');
+    } catch (err) {
+      els.exportStatus.textContent = 'Could not create the PDF. Please retry. ' + err.message;
+    } finally {
+      clearTimeout(startupTimer);
+      if (worker) worker.terminate();
+      if (job.cancelled) els.exportStatus.textContent = 'PDF preparation cancelled.';
+      printJob = null;
+      controls.forEach(([el, disabled]) => { el.disabled = disabled; });
+      els.cancelExport.hidden = true;
+      els.export.textContent = 'Save as PDF';
+    }
+  }
+
+  // ---------- Paper printing: prepare in batches without changing the screen preview ----------
+  async function printChat() {
     if (!state.parsed || printJob) return;
     // Apply pending edits once, before taking the export snapshot. A delayed
     // preview render must not remove the print document in a non-blocking browser.
@@ -516,6 +600,7 @@
   els.cancelExport.addEventListener('click', () => {
     if (printJob) {
       printJob.cancelled = true;
+      if (printJob.cancel) printJob.cancel();
       els.cancelExport.disabled = true;
       els.exportStatus.textContent = 'Cancelling preparation…';
     }
@@ -526,7 +611,8 @@
   ['title', 'me', 'from', 'to', 'search', 'paper', 'size', 'style', 'media', 'evidence'].forEach(k => els[k].addEventListener(k === 'search' || k === 'title' ? 'input' : 'change', scheduleRender));
   els.order.addEventListener('change', () => { if (!printJob) parseAndShow(); });
   els.export.addEventListener('click', exportPdf);
-  els.reset.addEventListener('click', () => { clearPrintDocument(); resetMedia(); state.parsed = null; state.rawText = ''; els.file.value = ''; els.title.value = ''; els.from.value = ''; els.to.value = ''; els.search.value = ''; els.exportStatus.textContent = ''; els.app.hidden = true; els.hero.hidden = false; });
+  els.print.addEventListener('click', printChat);
+  els.reset.addEventListener('click', () => { clearDownload(); clearPrintDocument(); resetMedia(); state.parsed = null; state.rawText = ''; els.file.value = ''; els.title.value = ''; els.from.value = ''; els.to.value = ''; els.search.value = ''; els.exportStatus.textContent = ''; els.app.hidden = true; els.hero.hidden = false; });
   function debounce(fn, ms) {
     let timer = null;
     const run = () => { timer = null; fn(); };

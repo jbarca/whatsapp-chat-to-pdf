@@ -1,0 +1,2 @@
+# Keep upstream minified dependencies byte-for-byte, including license whitespace.
+/vendor/*.min.js -whitespace
