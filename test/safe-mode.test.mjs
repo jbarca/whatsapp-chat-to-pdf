@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url), { chromium } = require('playwright');
 const root = fileURLToPath(new URL('../', import.meta.url));
-const files = new Map([['/', 'index.html'], ['/app.js', 'app.js'], ['/parser.js', 'parser.js'], ['/safe-policy.js', 'safe-policy.js'], ['/safe-worker.js', 'safe-worker.js'], ['/styles.css', 'styles.css']]);
+const files = new Map([['/', 'index.html'], ['/app.js', 'app.js'], ['/parser.js', 'parser.js'], ['/safe-policy.js', 'safe-policy.js'], ['/safe-scheduler.js', 'safe-scheduler.js'], ['/safe-worker.js', 'safe-worker.js'], ['/styles.css', 'styles.css']]);
 const server = createServer(async (req, res) => {
   const file = files.get(req.url.split('?')[0]); if (!file) { res.writeHead(404); res.end(); return; }
   res.setHeader('Content-Type', file.endsWith('.css') ? 'text/css' : file.endsWith('.html') ? 'text/html' : 'text/javascript'); res.end(await readFile(`${root}/${file}`));
@@ -17,10 +17,19 @@ try {
   const page = await browser.newPage();
   await page.addInitScript(() => {
     localStorage.setItem('wa2pdf.license', JSON.stringify({ key: 'test', ok: true }));
+    window.fakeWorkerStats = { created: 0, terminated: 0, runs: [], failNext: false };
     class FakeWorker {
-      constructor(url) { this.url = url; setTimeout(() => this.onmessage?.({ data: { type: 'ready', policyVersion: '1.0.0' } })); }
-      postMessage(data) { if (data.type === 'analyse') setTimeout(() => this.onmessage?.({ data: { type: 'complete', findings: [{ messageId: 2, category: 'abuse', reason: 'test finding', score: .9 }], unanalysed: [], partialCoverage: false, device: 'wasm', policyVersion: '1.0.0' } })); }
-      terminate() {}
+      constructor(url) { this.url = url; window.fakeWorkerStats.created++; setTimeout(() => this.onmessage?.({ data: { type: 'ready', policyVersion: '1.0.0' } })); }
+      postMessage(data) {
+        if (data.type === 'analyse') {
+          window.fakeWorkerStats.runs.push(data.runId);
+          const fail = window.fakeWorkerStats.failNext; window.fakeWorkerStats.failNext = false;
+          setTimeout(() => this.onmessage?.({ data: fail
+            ? { type: 'error', runId: data.runId, message: 'mock fatal error', fatal: true }
+            : { type: 'complete', runId: data.runId, findings: [{ messageId: 2, category: 'abuse', reason: 'test finding', score: .9 }], unanalysed: [], partialCoverage: false, device: 'wasm', policyVersion: '1.0.0', timings: {} } }), 100);
+        }
+      }
+      terminate() { window.fakeWorkerStats.terminated++; }
     }
     window.Worker = FakeWorker;
   });
@@ -37,6 +46,21 @@ try {
   assert.equal(await page.locator('#export').isDisabled(), false);
   await page.locator('#opt-search').fill('hello');
   assert.equal(await page.locator('#export').isDisabled(), true);
+  await page.locator('[name="safe-category"]').first().uncheck();
+  await page.locator('#safe-analyse').click(); await page.locator('#safe-review').waitFor({ state: 'visible' });
+  assert.deepEqual(await page.evaluate(() => ({ created: fakeWorkerStats.created, terminated: fakeWorkerStats.terminated, runs: fakeWorkerStats.runs })), { created: 1, terminated: 0, runs: [1, 2] });
+  await page.locator('#safe-review').evaluate(dialog => dialog.close());
+  await page.locator('#opt-safe').uncheck();
+  assert.equal(await page.evaluate(() => window.fakeWorkerStats.terminated), 1);
+  await page.locator('#opt-safe').check();
+  await page.evaluate(() => { window.fakeWorkerStats.failNext = true; });
+  await page.locator('#safe-analyse').click(); await page.locator('#safe-status').getByText('Retry', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.fakeWorkerStats.terminated), 2);
+  await page.locator('#safe-status').getByText('Retry', { exact: true }).click(); await page.locator('#safe-review').waitFor({ state: 'visible' });
+  await page.locator('#safe-review').evaluate(dialog => dialog.close());
+  await page.locator('[name="safe-category"]').last().uncheck(); await page.locator('#safe-analyse').click(); await page.locator('#safe-cancel').click();
+  assert.match(await page.locator('#safe-status').textContent(), /cancelled/i);
+  assert.equal(await page.evaluate(() => window.fakeWorkerStats.terminated), 3);
 
   const context = await browser.newContext();
   await context.addInitScript(() => localStorage.setItem('wa2pdf.license', JSON.stringify({ key: 'test', ok: true })));

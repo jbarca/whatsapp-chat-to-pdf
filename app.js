@@ -26,11 +26,12 @@
 
   const CHUNK_SIZE = 250;  // messages to show per chunk on screen
   const state = { rawText: '', fileName: '', sha256: '', media: new Map(), mediaUrls: new Map(), mediaLoads: new Map(), parsed: null, pro: false, chunkIndex: 0, lastDay: '', safe: freshSafeState() };
+  let safeRunSequence = 0;
   let printJob = null;
   let printDocument = null;
   let downloadUrl = null;
   const nextTask = () => new Promise(resolve => setTimeout(resolve, 0));
-  function freshSafeState() { return { fingerprint: '', status: 'idle', findings: new Map(), excludedIds: new Set(), unanalysed: [], policyVersion: SafePolicy.VERSION, partialCoverage: false, worker: null }; }
+  function freshSafeState() { return { fingerprint: '', status: 'idle', findings: new Map(), excludedIds: new Set(), unanalysed: [], policyVersion: SafePolicy.VERSION, partialCoverage: false, worker: null, workerReady: false, activeRunId: 0 }; }
 
   // ---------- Pro / licensing ----------
   function loadLicense() {
@@ -163,18 +164,25 @@
   function updateSafeExportState() {
     const blocked = !!(state.parsed && els.safe.checked && !safeReady());
     els.export.disabled = blocked; els.print.disabled = blocked;
-    if (blocked && !state.safe.worker) els.exportStatus.textContent = 'Safe mode export is blocked until the current scan is reviewed and applied.';
+    if (blocked && state.safe.status !== 'scanning') els.exportStatus.textContent = 'Safe mode export is blocked until the current scan is reviewed and applied.';
     else if (!blocked && /^Safe mode export is blocked/.test(els.exportStatus.textContent)) els.exportStatus.textContent = '';
   }
   function invalidateSafe(message) {
-    if (state.safe.worker) { state.safe.worker.terminate(); state.safe.worker = null; }
+    if (state.safe.status === 'scanning') destroySafeWorker(true);
     state.safe.fingerprint = ''; state.safe.status = els.safe && els.safe.checked ? 'stale' : 'idle';
     state.safe.findings.clear(); state.safe.excludedIds.clear(); state.safe.unanalysed = [];
     if (els.safeStatus && els.safe.checked) els.safeStatus.textContent = message || 'Options changed. Analyse again before exporting.';
     if (state.parsed) { updateSafeExportState(); render(); }
   }
+  function destroySafeWorker(cancel) {
+    const worker = state.safe.worker, runId = state.safe.activeRunId;
+    state.safe.worker = null; state.safe.workerReady = false; state.safe.activeRunId = 0;
+    if (!worker) return;
+    if (cancel && runId) worker.postMessage({ type: 'cancel', runId });
+    worker.terminate();
+  }
   function resetSafeMode(uncheck) {
-    if (state.safe && state.safe.worker) state.safe.worker.terminate();
+    if (state.safe) destroySafeWorker(true);
     state.safe = freshSafeState();
     if (uncheck && els.safe) els.safe.checked = false;
     if (els.safeOptions) els.safeOptions.hidden = !els.safe.checked;
@@ -182,7 +190,7 @@
     updateSafeExportState();
   }
   function safeFailure(message) {
-    state.safe.status = 'error'; state.safe.worker = null;
+    destroySafeWorker(false); state.safe.status = 'error';
     els.safeCancel.hidden = true; els.safeAnalyse.disabled = false;
     els.safeStatus.replaceChildren(document.createTextNode(`Safe mode failed: ${message} `));
     const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'link-button'; retry.textContent = 'Retry'; retry.onclick = startSafeScan;
@@ -191,32 +199,36 @@
     updateSafeExportState();
   }
   async function startSafeScan() {
-    if (!state.pro || !state.parsed || state.safe.worker) return;
+    if (!state.pro || !state.parsed || state.safe.status === 'scanning') return;
     if (!window.Worker || !window.WebAssembly) { safeFailure('This browser does not support the required on-device worker and WebAssembly features.'); return; }
     invalidateSafe('Starting analysis…');
-    const fingerprint = safeFingerprint(), messages = currentMessages();
-    state.safe.status = 'scanning';
+    const fingerprint = safeFingerprint(), messages = currentMessages(), runId = ++safeRunSequence;
+    state.safe.status = 'scanning'; state.safe.activeRunId = runId;
     els.safeAnalyse.disabled = true; els.safeCancel.hidden = false; els.safeCancel.disabled = false;
     els.safeStatus.textContent = `Preparing to screen ${messages.length.toLocaleString()} messages…`;
-    const worker = new Worker('safe-worker.js'); state.safe.worker = worker;
-    let ready = false;
-    const timeout = setTimeout(() => { if (!ready && state.safe.worker === worker) { worker.terminate(); safeFailure('The screening worker did not start.'); } }, 45000);
-    worker.onerror = event => { event.preventDefault(); clearTimeout(timeout); worker.terminate(); if (state.safe.worker === worker) safeFailure(event.message || 'The worker stopped unexpectedly.'); };
-    worker.onmessageerror = () => { worker.terminate(); if (state.safe.worker === worker) safeFailure('The browser could not receive screening results.'); };
+    const worker = state.safe.worker || new Worker('safe-worker.js'); state.safe.worker = worker;
+    let sent = false;
+    const send = () => {
+      if (sent || state.safe.worker !== worker || state.safe.activeRunId !== runId) return;
+      sent = true; worker.postMessage({ type: 'analyse', runId, messages, categories: safeCategories(), customTerms: els.safeTerms.value, scanImages: els.media.checked && safeCategories().includes('images') });
+    };
+    const timeout = state.safe.workerReady ? null : setTimeout(() => { if (!state.safe.workerReady && state.safe.worker === worker) safeFailure('The screening worker did not start.'); }, 45000);
+    worker.onerror = event => { event.preventDefault(); clearTimeout(timeout); if (state.safe.worker === worker) safeFailure(event.message || 'The worker stopped unexpectedly.'); };
+    worker.onmessageerror = () => { if (state.safe.worker === worker) safeFailure('The browser could not receive screening results.'); };
     worker.onmessage = async ({ data }) => {
       if (state.safe.worker !== worker) return;
       if (data.type === 'ready') {
-        ready = true; clearTimeout(timeout);
-        worker.postMessage({ type: 'analyse', messages, categories: safeCategories(), customTerms: els.safeTerms.value, scanImages: els.media.checked && safeCategories().includes('images') });
-      } else if (data.type === 'progress') els.safeStatus.textContent = data.message;
-      else if (data.type === 'image-request') {
+        state.safe.workerReady = true; clearTimeout(timeout); send(); return;
+      }
+      if (data.runId !== runId || state.safe.activeRunId !== runId) return;
+      if (data.type === 'progress') els.safeStatus.textContent = data.message;
+      else if (data.type === 'image-batch-request') {
         try {
-          const entry = state.media.get(data.name), buffer = entry ? await entry.async('arraybuffer') : null;
-          if (state.safe.worker === worker) worker.postMessage({ type: 'image-response', buffer }, buffer ? [buffer] : []);
-        } catch (e) { if (state.safe.worker === worker) worker.postMessage({ type: 'image-response', buffer: null }); }
+          const buffers = await Promise.all(data.names.map(async name => { const entry = state.media.get(name); return entry ? entry.async('arraybuffer').catch(() => null) : null; }));
+          if (state.safe.worker === worker && state.safe.activeRunId === runId) worker.postMessage({ type: 'image-batch-response', runId, buffers }, buffers.filter(Boolean));
+        } catch (e) { if (state.safe.worker === worker && state.safe.activeRunId === runId) worker.postMessage({ type: 'image-batch-response', runId, buffers: data.names.map(() => null) }); }
       } else if (data.type === 'complete') {
-        worker.terminate(); state.safe.worker = null;
-        state.safe.status = 'review'; state.safe.fingerprint = fingerprint; state.safe.policyVersion = data.policyVersion;
+        state.safe.status = 'review'; state.safe.activeRunId = 0; state.safe.fingerprint = fingerprint; state.safe.policyVersion = data.policyVersion;
         state.safe.unanalysed = data.unanalysed || []; state.safe.partialCoverage = !!data.partialCoverage;
         state.safe.findings = new Map();
         for (const finding of data.findings || []) {
@@ -224,11 +236,12 @@
           state.safe.findings.get(finding.messageId).push(finding);
         }
         els.safeAnalyse.disabled = false; els.safeCancel.hidden = true;
-        const engine = data.device === 'wasm' ? ' Used the single-threaded WASM fallback.' : data.device === 'webgpu' ? ' Used WebGPU.' : ' Used deterministic local rules.';
+        const engine = data.device === 'wasm' ? ' Used WASM.' : data.device === 'webgpu' ? ' Used WebGPU.' : ' Used deterministic local rules.';
         els.safeStatus.textContent = `${state.safe.findings.size.toLocaleString()} messages flagged for review.` + (data.partialCoverage ? ' Non-English text has partial coverage.' : '') + engine;
         openSafeReview(); updateSafeExportState();
-      } else if (data.type === 'error') { clearTimeout(timeout); worker.terminate(); safeFailure(data.message || 'Unknown model error.'); }
+      } else if (data.type === 'error') { clearTimeout(timeout); safeFailure(data.message || 'Unknown model error.'); }
     };
+    if (state.safe.workerReady) send();
   }
   function openSafeReview() {
     els.safeReviewList.replaceChildren(); els.safeAck.checked = false;
@@ -748,7 +761,7 @@
   els.safeTerms.addEventListener('input', () => invalidateSafe('Custom terms changed. Analyse again before exporting.'));
   els.safeAnalyse.addEventListener('click', () => ['review', 'applied'].includes(state.safe.status) ? openSafeReview() : startSafeScan());
   els.safeCancel.addEventListener('click', () => {
-    if (!state.safe.worker) return; state.safe.worker.postMessage({ type: 'cancel' }); state.safe.worker.terminate(); state.safe.worker = null;
+    if (state.safe.status !== 'scanning') return; destroySafeWorker(true);
     state.safe.status = 'stale'; els.safeCancel.hidden = true; els.safeAnalyse.disabled = false; els.safeStatus.textContent = 'Analysis cancelled. Analyse again before exporting.'; updateSafeExportState();
   });
   els.safeSelectAll.addEventListener('click', () => els.safeReviewList.querySelectorAll('[name="safe-remove"]').forEach(x => { x.checked = true; }));
