@@ -108,6 +108,8 @@
     </fieldset>
 
     <button id="export" class="btn btn-primary big">Save as PDF</button>
+    <button id="cancel-export" class="btn btn-ghost" hidden>Cancel preparation</button>
+    <p id="export-status" class="tiny muted" role="status" aria-live="polite"></p>
     <p class="tiny muted">Opens your browser's print dialog. Choose <strong>Save as PDF</strong> as the destination. Tip: turn on "Background graphics" for bubble colours.</p>
     <button id="reset" class="btn btn-ghost">Start over</button>
   </aside>
@@ -165,7 +167,7 @@
   <details><summary>Which exports are supported?</summary><p>iPhone and Android, with or without media, in any language WhatsApp ships. 12-hour and 24-hour times, day-first, month-first and year-first dates (auto-detected, with a manual override).</p></details>
   <details><summary>The dates look swapped.</summary><p>Some exports are ambiguous (e.g. 03/04/26). Change <em>Date order</em> in the options panel.</p></details>
   <details><summary>Photos don't show up.</summary><p>Photos are only in the export if you chose <em>Attach media</em> in WhatsApp, which gives you a <code>.zip</code>. Drop the whole zip here and tick <em>Embed photos</em> (Pro).</p></details>
-  <details><summary>Very large chats?</summary><p>Tens of thousands of messages work, but the browser print dialog can take a while to build the PDF. Use the date filter to split a huge chat into a few PDFs if it stalls.</p></details>
+  <details><summary>Very large chats?</summary><p>PDF preparation runs in batches with progress and a cancel button. Photos are sized for printing to reduce memory use. The print dialog may still take a moment to paginate very long chats; date and keyword filters can narrow the document.</p></details>
   <details><summary>Refunds?</summary><p>If Pro doesn't work for your export, email the address on your receipt with the first few lines of the file (dates only, no need for content) and you'll get a fix or a refund.</p></details>
 </section>
 

@@ -19,13 +19,15 @@
     order: $('opt-order'), paper: $('opt-paper'), size: $('opt-size'), style: $('opt-style'),
     media: $('opt-media'), evidence: $('opt-evidence'), proState: $('pro-state'), proCta: $('pro-cta'),
     buy: $('buy'), buy2: $('buy2'), price: $('price'), licenseForm: $('license-form'), licenseKey: $('license-key'), licenseMsg: $('license-msg'),
-    export: $('export'), reset: $('reset'), chatTitle: $('chat-title'), stats: $('stats'), warnings: $('warnings'),
+    export: $('export'), cancelExport: $('cancel-export'), exportStatus: $('export-status'), reset: $('reset'), chatTitle: $('chat-title'), stats: $('stats'), warnings: $('warnings'),
     loadMoreControls: $('load-more-controls'), loadMore: $('load-more'), loadAll: $('load-all'), loadStatus: $('load-status'),
   };
 
   const CHUNK_SIZE = 250;  // messages to show per chunk on screen
-  const state = { rawText: '', fileName: '', sha256: '', media: new Map(), mediaUrls: new Map(), parsed: null, pro: false, chunkIndex: 0, lastDay: '' };
-  let printingFull = false;  // flag to guard against double-restoration
+  const state = { rawText: '', fileName: '', sha256: '', media: new Map(), mediaUrls: new Map(), mediaLoads: new Map(), parsed: null, pro: false, chunkIndex: 0, lastDay: '' };
+  let printJob = null;
+  let printDocument = null;
+  const nextTask = () => new Promise(resolve => setTimeout(resolve, 0));
 
   // ---------- Pro / licensing ----------
   function loadLicense() {
@@ -81,6 +83,8 @@
   els.file.addEventListener('change', () => { if (els.file.files[0]) loadFile(els.file.files[0]); });
 
   async function loadFile(file) {
+    if (printJob) return;
+    clearPrintDocument();
     resetMedia();
     state.fileName = file.name;
     try {
@@ -111,7 +115,7 @@
   }
   function resetMedia() {
     for (const u of state.mediaUrls.values()) URL.revokeObjectURL(u);
-    state.media = new Map(); state.mediaUrls = new Map();
+    state.media = new Map(); state.mediaUrls = new Map(); state.mediaLoads = new Map();
   }
   async function sha256Hex(text) {
     try {
@@ -150,11 +154,10 @@
     return p.messages.filter(m => (!from || m.date >= from) && (!to || m.date <= to) && (!q || (m.text || '').toLowerCase().includes(q) || (m.sender || '').toLowerCase().includes(q)));
   }
 
-  // Helper: create document header (running head + cover/title)
+  // Helper: create the cover or title. Running headers use the page margin.
   function docHeader(ctx) {
     const { title, displayMsgs, evidence, senders } = ctx;
     const frag = document.createDocumentFragment();
-    const head = document.createElement('div'); head.className = 'running-head'; head.textContent = `${title} — exported ${fmtDate(new Date())} — ${state.fileName}`; frag.appendChild(head);
     if (evidence) frag.appendChild(coverPage(title, displayMsgs));
     else {
       const h = document.createElement('h1'); h.className = 'doc-title'; h.textContent = title; frag.appendChild(h);
@@ -165,30 +168,37 @@
     return frag;
   }
 
-  // Message rows for `msgs`; day separators continue across chunks via state.lastDay.
+  // Each render has its own day cursor; preparing a PDF must not change the preview.
   function messageRows(msgs, ctx) {
-    const { me, evidence, embed, numWidth, displayMsgs, tailMarkerCount } = ctx;
+    const { me, evidence, embed, numWidth, tailMarkerCount } = ctx;
     const frag = document.createDocumentFragment();
-    const urlPromises = [];
+    const imageTasks = [];
 
-    // Track day across chunks using state.lastDay
     for (const m of msgs) {
       const day = m.date.toDateString();
-      if (day !== state.lastDay) {
-        state.lastDay = day;
+      if (day !== ctx.lastDay) {
+        ctx.lastDay = day;
         const d = document.createElement('div'); d.className = 'day'; const sp = document.createElement('span'); sp.textContent = fmtDay(m.date); d.appendChild(sp); frag.appendChild(d);
       }
       const row = document.createElement('div');
       row.className = 'msg' + (m.system ? ' system' : (me && m.sender === me ? ' me' : ''));
       const b = document.createElement('div'); b.className = 'bubble';
       if (evidence) { const n = document.createElement('span'); n.className = 'num'; n.textContent = '#' + String(m.id).padStart(numWidth, '0'); b.appendChild(n); }
-      if (!m.system && m.sender && !(me && m.sender === me && els.style.value !== 'plain')) { const s = document.createElement('span'); s.className = 'sender'; s.textContent = m.sender; b.appendChild(s); }
-      if (evidence && !m.system && me && m.sender === me) { const s = document.createElement('span'); s.className = 'sender'; s.textContent = m.sender; b.appendChild(s); }
+      if (!m.system && m.sender && (evidence || ctx.plain || m.sender !== me)) { const s = document.createElement('span'); s.className = 'sender'; s.textContent = m.sender; b.appendChild(s); }
       for (const a of m.attachments) {
         const entry = state.media.get(a);
         if (embed && entry && /\.(jpe?g|png|gif|webp)$/i.test(a)) {
           const img = document.createElement('img'); img.alt = a; img.loading = 'eager'; b.appendChild(img);
-          urlPromises.push(objectUrl(a, entry).then(u => { img.src = u; }));
+          imageTasks.push(async () => {
+            try {
+              img.src = await (ctx.imageUrl || objectUrl)(a, entry);
+              await img.decode();
+            } catch (err) {
+              const label = document.createElement('span'); label.className = 'att';
+              label.textContent = '📎 ' + a + ' (image unavailable)'; img.replaceWith(label);
+              if (ctx.onImageError) ctx.onImageError();
+            }
+          });
         } else { const c = document.createElement('span'); c.className = 'att'; c.textContent = '📎 ' + a; b.appendChild(c); }
       }
       if (m.mediaOmitted) { const c = document.createElement('span'); c.className = 'att'; c.textContent = '📎 media (not included in export)'; b.appendChild(c); }
@@ -203,7 +213,7 @@
       const end = document.createElement('div'); end.className = 'day'; const sp = document.createElement('span'); sp.textContent = `… ${tailMarkerCount.toLocaleString()} more messages in the full version`; end.appendChild(sp); frag.appendChild(end);
     }
 
-    return { frag, urlPromises };
+    return { frag, imageTasks };
   }
 
   // Everything the header/rows need for the current filters + tier.
@@ -215,6 +225,8 @@
     return {
       all, limited, displayMsgs, senders: p.senders,
       me: els.me.value,
+      plain: els.style.value === 'plain',
+      lastDay: '',
       evidence: state.pro && els.evidence.checked,
       embed: state.pro && els.media.checked && state.media.size > 0,
       title: els.title.value || 'WhatsApp chat',
@@ -225,6 +237,8 @@
 
   // Render one on-screen chunk. Chunk 0 replaces the document (header + first rows); later chunks append.
   function renderChunk(chunkIndex) {
+    if (printJob) return;
+    clearPrintDocument();
     const p = state.parsed; if (!p) return;
     const ctx = docContext();
     const { all, limited, displayMsgs } = ctx;
@@ -245,8 +259,13 @@
       state.lastDay = '';
       frag.appendChild(docHeader(ctx));
     }
-    frag.appendChild(messageRows(displayMsgs.slice(chunkStart, chunkEnd), { ...ctx, tailMarkerCount: hasMore ? 0 : ctx.hiddenCount }).frag);
+    ctx.lastDay = state.lastDay;
+    ctx.tailMarkerCount = hasMore ? 0 : ctx.hiddenCount;
+    const rows = messageRows(displayMsgs.slice(chunkStart, chunkEnd), ctx);
+    state.lastDay = ctx.lastDay;
+    frag.appendChild(rows.frag);
     if (chunkIndex === 0) els.doc.replaceChildren(frag); else els.doc.appendChild(frag);
+    runImageTasks(rows.imageTasks);
 
     state.chunkIndex = chunkIndex;
     els.loadMoreControls.hidden = !hasMore;
@@ -255,31 +274,34 @@
 
   function render() { renderChunk(0); }
 
-  // Re-render chunks 0..upTo (used to restore the screen after printing).
-  function renderChunksUpTo(upTo) {
-    if (!state.parsed) return;
-    const total = docContext().displayMsgs.length;
-    renderChunk(0);
-    for (let i = 1; i <= upTo && i * CHUNK_SIZE < total; i++) renderChunk(i);
+  // Hidden on screen: the browser lays out the full chat only once, for printing.
+  function createPrintDocument(ctx) {
+    clearPrintDocument();
+    setPaper(els.paper.value);
+    const doc = document.createElement('article');
+    doc.id = 'print-doc';
+    doc.className = 'doc size-' + els.size.value + (ctx.plain ? ' plain' : '') + (ctx.limited ? ' wm' : '');
+    doc.appendChild(docHeader(ctx));
+    document.body.appendChild(doc);
+    printDocument = doc;
+    return doc;
   }
 
-  // Full document for printing: header + every displayable row + free-tier tail marker.
-  function buildFullDocument() {
-    if (!state.parsed) return null;
-    const ctx = docContext();
-    const frag = document.createDocumentFragment();
-    frag.appendChild(docHeader(ctx));
-    state.lastDay = '';
-    const { frag: rows, urlPromises } = messageRows(ctx.displayMsgs, { ...ctx, tailMarkerCount: ctx.hiddenCount });
-    frag.appendChild(rows);
-    return { frag, urlPromises };
+  function clearPrintDocument() {
+    if (printDocument) {
+      if (printDocument.releaseImages) printDocument.releaseImages();
+      printDocument.remove();
+    }
+    printDocument = null;
+    document.body.classList.remove('print-ready');
   }
 
-  function showFullDocument() {
-    const result = buildFullDocument(); if (!result) return null;
-    els.doc.replaceChildren(result.frag);
-    els.loadMoreControls.hidden = true;
-    return result;
+  async function runImageTasks(tasks, job) {
+    // Avoid inflating/decoding an entire ZIP's photos concurrently.
+    let cursor = 0;
+    await Promise.all(Array.from({ length: Math.min(4, tasks.length) }, async () => {
+      while (cursor < tasks.length && !(job && job.cancelled)) await tasks[cursor++]();
+    }));
   }
 
   function coverPage(title, all) {
@@ -312,13 +334,62 @@
   }
   async function objectUrl(name, entry) {
     if (state.mediaUrls.has(name)) return state.mediaUrls.get(name);
-    const blob = await entry.async('blob');
-    const u = URL.createObjectURL(blob); state.mediaUrls.set(name, u); return u;
+    if (state.mediaLoads.has(name)) return state.mediaLoads.get(name);
+    const urls = state.mediaUrls, loads = state.mediaLoads;
+    const pending = entry.async('blob').then(blob => {
+      if (urls !== state.mediaUrls) throw new Error('Chat changed');
+      const u = URL.createObjectURL(blob); urls.set(name, u); return u;
+    }).finally(() => loads.delete(name));
+    loads.set(name, pending);
+    return pending;
+  }
+
+  function printImageUrl(name, entry, job) {
+    if (job.images.has(name)) return job.images.get(name);
+    const pending = (async () => {
+      const blob = await entry.async('blob');
+      if (job.cancelled) throw new Error('Cancelled');
+      const source = URL.createObjectURL(blob);
+      const img = new Image();
+      try {
+        img.src = source;
+        await img.decode();
+        if (job.cancelled) throw new Error('Cancelled');
+        // Keep photos at print resolution instead of their full camera resolution.
+        // Full-resolution phone photos otherwise exhaust the print engine's memory.
+        const scale = Math.min(1, 1800 / img.naturalWidth, 1260 / img.naturalHeight);
+        let output = blob;
+        if (scale < 1) {
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+          canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+          canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+          const type = /\.jpe?g$/i.test(name) ? 'image/jpeg' : 'image/png';
+          output = await new Promise(resolve => canvas.toBlob(resolve, type, 0.92));
+          canvas.width = canvas.height = 0;
+          if (!output) throw new Error('Could not prepare photo');
+        }
+        if (job.cancelled) throw new Error('Cancelled');
+        const url = URL.createObjectURL(output);
+        job.urls.add(url);
+        return url;
+      } finally {
+        img.removeAttribute('src');
+        URL.revokeObjectURL(source);
+      }
+    })();
+    job.images.set(name, pending);
+    return pending;
   }
   function setPaper(p) {
     let st = document.getElementById('paper-style');
     if (!st) { st = document.createElement('style'); st.id = 'paper-style'; document.head.appendChild(st); }
-    st.textContent = `@page { size: ${p === 'letter' ? 'letter' : 'A4'}; }`;
+    const heading = `${els.title.value || 'WhatsApp chat'} — exported ${fmtDate(new Date())} — ${state.fileName}`;
+    // A page-margin box stays outside the messages. Fixed DOM headers can overlap
+    // photos and long messages when Chromium fragments thousands of pages.
+    st.textContent = `@page { size: ${p === 'letter' ? 'letter' : 'A4'};
+      @top-left { content: "${CSS.escape(heading)}"; font: 8pt sans-serif; color: #666; max-width: 180mm; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    }`;
   }
 
   // ---------- Helpers ----------
@@ -336,22 +407,38 @@
   }
   const pad = (n) => String(n).padStart(2, '0');
   function isoDate(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
-  function fmtDate(d) { return d ? d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : ''; }
-  function fmtDay(d) { return d.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }); }
-  function fmtTime(d) { return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }
+  // Reusing Intl formatters avoids thousands of costly ICU allocations per export.
+  const dateFormatter = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  const dayFormatter = new Intl.DateTimeFormat(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const timeFormatter = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+  function fmtDate(d) { return d ? dateFormatter.format(d) : ''; }
+  function fmtDay(d) { return dayFormatter.format(d); }
+  function fmtTime(d) { return timeFormatter.format(d); }
   function fmtDateTime(d, secs) { return d ? `${isoDate(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}${secs ? ':' + pad(d.getSeconds()) : ''}` : ''; }
 
   // ---------- Print handling ----------
-  // Ctrl+P / File > Print: swap in the full document synchronously, restore the chunked view afterwards.
-  let printedViaShortcut = false;
+  // Route keyboard printing through the asynchronous preparation, including images.
+  window.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p' && state.parsed) {
+      e.preventDefault(); exportPdf();
+    }
+  });
+  // File > Print cannot await preparation. Preserve the full text for that path too.
   window.addEventListener('beforeprint', () => {
-    if (printingFull || !state.parsed) return;
-    if (els.doc.querySelectorAll('.msg').length < docContext().displayMsgs.length) { printedViaShortcut = true; showFullDocument(); }
+    if (!printJob) scheduleRender.flush();
+    if (!state.parsed || (printJob && printJob.ready) || (!printJob && printDocument)) return;
+    // A browser-menu print during preparation must never print a partial batch.
+    if (printJob) printJob.cancelled = true;
+    const ctx = docContext();
+    const doc = createPrintDocument(ctx);
+    ctx.tailMarkerCount = ctx.hiddenCount;
+    const rows = messageRows(ctx.displayMsgs, ctx);
+    doc.appendChild(rows.frag);
+    runImageTasks(rows.imageTasks);
+    document.body.classList.add('print-ready');
   });
   window.addEventListener('afterprint', () => {
-    if (printingFull || !printedViaShortcut) return;
-    printedViaShortcut = false;
-    renderChunksUpTo(state.chunkIndex);
+    if (!printJob || printJob.ready || printJob.cancelled) clearPrintDocument();
   });
 
   // ---------- Load-more handlers ----------
@@ -365,33 +452,88 @@
     while ((state.chunkIndex + 1) * CHUNK_SIZE < total) renderChunk(state.chunkIndex + 1);
   });
 
-  // ---------- PDF export: full render off-DOM, wait for images, print, restore chunked view ----------
+  // ---------- PDF export: prepare in batches without laying out the full chat on screen ----------
   async function exportPdf() {
-    if (!state.parsed) return;
-    const savedChunk = state.chunkIndex;
-    printingFull = true;
-    els.export.disabled = true; els.export.textContent = 'Preparing PDF…';
+    if (!state.parsed || printJob) return;
+    // Apply pending edits once, before taking the export snapshot. A delayed
+    // preview render must not remove the print document in a non-blocking browser.
+    scheduleRender.flush();
+    clearPrintDocument();
+    const job = { cancelled: false, ready: false, images: new Map(), urls: new Set(), imageErrors: 0 };
+    printJob = job;
+    const controls = Array.from(els.app.querySelectorAll('input, select, button')).map(el => [el, el.disabled]);
+    controls.forEach(([el]) => { el.disabled = true; });
+    els.export.textContent = 'Preparing PDF…';
+    els.cancelExport.hidden = false; els.cancelExport.disabled = false;
+    els.exportStatus.textContent = 'Preparing messages…';
     try {
-      const result = showFullDocument(); if (!result) return;
-      await Promise.all(result.urlPromises);
-      await Promise.allSettled(Array.from(els.doc.querySelectorAll('img')).map(img => img.decode ? img.decode() : Promise.resolve()));
-      await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));  // let layout settle
-      const done = new Promise(r => window.addEventListener('afterprint', r, { once: true }));
+      await nextTask();
+      if (job.cancelled) return;
+      const ctx = docContext();
+      ctx.imageUrl = (name, entry) => printImageUrl(name, entry, job);
+      ctx.onImageError = () => { if (!job.cancelled) job.imageErrors++; };
+      const doc = createPrintDocument(ctx);
+      job.doc = doc;
+      doc.releaseImages = () => { job.urls.forEach(url => URL.revokeObjectURL(url)); job.urls.clear(); job.images.clear(); };
+      for (let start = 0; start < ctx.displayMsgs.length; start += CHUNK_SIZE) {
+        if (job.cancelled) return;
+        const end = Math.min(start + CHUNK_SIZE, ctx.displayMsgs.length);
+        ctx.tailMarkerCount = end === ctx.displayMsgs.length ? ctx.hiddenCount : 0;
+        const rows = messageRows(ctx.displayMsgs.slice(start, end), ctx);
+        doc.appendChild(rows.frag);
+        els.exportStatus.textContent = `Preparing ${end.toLocaleString()} of ${ctx.displayMsgs.length.toLocaleString()} messages…`;
+        await runImageTasks(rows.imageTasks, job);
+        await nextTask();
+      }
+      if (job.cancelled) return;
+      await document.fonts.ready;
+      if (job.cancelled) return;
+      job.ready = true;
+      document.body.classList.add('print-ready');
+      els.cancelExport.hidden = true;
+      els.exportStatus.textContent = 'Opening print dialog…';
+      await nextTask();
       window.print();
-      await done;
+      els.exportStatus.textContent = job.imageErrors
+        ? `Print dialog opened. ${job.imageErrors.toLocaleString()} ${job.imageErrors === 1 ? 'photo is' : 'photos are'} unavailable and labelled in the document.`
+        : 'Choose Save as PDF in the print dialog.';
+    } catch (err) {
+      clearPrintDocument();
+      els.exportStatus.textContent = 'Could not prepare the PDF. Please try again. ' + err.message;
     } finally {
-      printingFull = false;
-      renderChunksUpTo(savedChunk);
-      els.export.disabled = false; els.export.textContent = 'Save as PDF';
+      if (job.cancelled) {
+        if (printDocument === job.doc) clearPrintDocument();
+        els.exportStatus.textContent = 'PDF preparation cancelled.';
+      }
+      printJob = null;
+      controls.forEach(([el, disabled]) => { el.disabled = disabled; });
+      els.cancelExport.hidden = true;
+      els.export.textContent = 'Save as PDF';
+      // Do not await afterprint: some browsers return without firing it. The hidden
+      // document is retained until afterprint or the next edit/export in those browsers.
     }
   }
+  els.cancelExport.addEventListener('click', () => {
+    if (printJob) {
+      printJob.cancelled = true;
+      els.cancelExport.disabled = true;
+      els.exportStatus.textContent = 'Cancelling preparation…';
+    }
+  });
 
   // ---------- Wiring ----------
-  ['title', 'me', 'from', 'to', 'search', 'paper', 'size', 'style', 'media', 'evidence'].forEach(k => els[k].addEventListener(k === 'search' || k === 'title' ? 'input' : 'change', debounce(render, 150)));
-  els.order.addEventListener('change', parseAndShow);
+  const scheduleRender = debounce(render, 150);
+  ['title', 'me', 'from', 'to', 'search', 'paper', 'size', 'style', 'media', 'evidence'].forEach(k => els[k].addEventListener(k === 'search' || k === 'title' ? 'input' : 'change', scheduleRender));
+  els.order.addEventListener('change', () => { if (!printJob) parseAndShow(); });
   els.export.addEventListener('click', exportPdf);
-  els.reset.addEventListener('click', () => { resetMedia(); state.parsed = null; state.rawText = ''; els.file.value = ''; els.title.value = ''; els.from.value = ''; els.to.value = ''; els.search.value = ''; els.app.hidden = true; els.hero.hidden = false; });
-  function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }
+  els.reset.addEventListener('click', () => { clearPrintDocument(); resetMedia(); state.parsed = null; state.rawText = ''; els.file.value = ''; els.title.value = ''; els.from.value = ''; els.to.value = ''; els.search.value = ''; els.exportStatus.textContent = ''; els.app.hidden = true; els.hero.hidden = false; });
+  function debounce(fn, ms) {
+    let timer = null;
+    const run = () => { timer = null; fn(); };
+    const schedule = () => { clearTimeout(timer); timer = setTimeout(run, ms); };
+    schedule.flush = () => { if (timer !== null) { clearTimeout(timer); run(); } };
+    return schedule;
+  }
 
   loadLicense();
 })();

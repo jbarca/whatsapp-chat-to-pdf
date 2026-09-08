@@ -93,19 +93,26 @@ code{background:#eef0f3;padding:.1em .35em;border-radius:4px;font-size:.92em}
 .info details{border-top:1px solid var(--line);padding:8px 0}
 .info summary{cursor:pointer;font-weight:600}
 .foot{display:flex;justify-content:space-between;padding:20px;color:var(--muted);font-size:.9em;flex-wrap:wrap;gap:8px}
+#print-doc{display:none}
+#export-status:empty{display:none}
+button:disabled{cursor:wait;opacity:.65}
 
 @page{margin:16mm 14mm}
 @page{@bottom-right{content:"Page " counter(page);font-size:9pt;color:#666}}
 .doc.a4{--paper:a4}
 @media print{
+  body.print-ready> :not(#print-doc){display:none!important}
+  body.print-ready>#print-doc{display:block}
   body{background:#fff}
   header,footer,.hero,.info,.panel,.notice,#reset,.load-controls{display:none!important}
   .wrap{max-width:none;padding:0}
   .app{display:block;margin:0}
   .doc{border:0;padding:0;box-shadow:none;border-radius:0;overflow:visible}
   .doc.wm::before{position:fixed;inset:0;transform:rotate(-28deg)}
-  .bubble{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .msg{display:block}
+  .bubble{width:fit-content;box-shadow:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .msg.me .bubble{margin-left:auto}
+  .msg.system .bubble{margin-left:auto;margin-right:auto}
+  .doc.plain .bubble{width:auto;margin-left:0;margin-right:0}
   .msg.me .bubble{background:var(--me)!important}
-  .running-head{position:fixed;top:-12mm;left:0;right:0;font-size:8pt;color:#666;border-bottom:1px solid #ddd;padding-bottom:2pt;display:block}
 }
-.running-head{display:none}

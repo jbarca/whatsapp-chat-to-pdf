@@ -5,12 +5,14 @@ Pro unlock = Gumroad license key verified client-side (`api.gumroad.com/v2/licen
 
 ## Rendering model (app.js, 2026-09-08)
 - Screen shows `CHUNK_SIZE` (250) messages per chunk; `renderChunk(i)` (0 replaces, >0 appends), `render()` = chunk 0. `#load-more`/`#load-all` buttons in `#load-more-controls`. Day separators continue across chunks via `state.lastDay`.
-- Shared builders: `docContext()` (filters/tier → ctx), `docHeader(ctx)`, `messageRows(msgs, ctx)`; `buildFullDocument()`/`showFullDocument()` render everything for print. Never duplicate the row loop.
-- Print: `exportPdf()` (button) swaps in the full doc, awaits object URLs + `img.decode()`, `window.print()`, restores chunks via `renderChunksUpTo()`. `beforeprint` handles Ctrl+P the same way synchronously (`printingFull` guard prevents double handling). Free-tier tail marker ("… N more messages in the full version") appears after the last on-screen chunk and in the PDF.
+- Shared builders: `docContext()` (filters/tier → ctx), `docHeader(ctx)`, `messageRows(msgs, ctx)`. Each context owns its day cursor; the preview saves it in `state.lastDay`. Never duplicate the row loop. Reuse the cached `Intl.DateTimeFormat` instances.
+- Print: `exportPdf()` flushes pending option edits, builds hidden `#print-doc` in 250-message batches with progress/cancellation, waits for bounded image processing and fonts, then calls `window.print()`. The preview nodes and chunk cursor stay intact. Print CSS uses block layout without bubble shadows. Photos larger than their print resolution are resized; print-only object URLs are revoked on cleanup. Unreadable photos retain labelled placeholders.
+- Ctrl/Cmd+P uses asynchronous export; browser-menu `beforeprint` builds the full text synchronously if needed. `afterprint` removes the print document; export controls recover without awaiting that event (some browsers omit it). A subsequent edit/export also removes any retained print document. Free-tier limits and tail markers apply to both preview and PDF.
 - Large synthetic export for perf tests: scratchpad `gen-large.js` → `large-export.txt` (30k msgs), not committed.
 
 ## Commands
 - Tests: `~/.nvm/versions/node/v26.8.1/bin/node test/parser.test.mjs` (default `node` is v14 and fails on `node:assert/strict`).
+- PDF regression: `node test/pdf-export.test.mjs` with Node 22+, Chrome, and development packages `playwright`, `jszip`, `pdfjs-dist`. Set `PDF_TEST_MESSAGES=30000` for a stress test that reads back every message from the PDF. Artifacts go to the OS temporary directory; no real chat data is used.
 - Local: `python3 -m http.server 8080 --bind 127.0.0.1`; `?sample=1` loads `test/sample-ios.txt`.
 - Headless smoke test: Chrome at `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` with `--headless=new --virtual-time-budget=8000 --dump-dom|--print-to-pdf=|--screenshot=`. Pro path: temporary harness page that seeds `localStorage['wa2pdf.license']={key,ok:true}` (see session 2026-09-07; harness is not committed).
 - Verified 2026-09-07: free = 100 msgs + watermark (8-page PDF for sample); Pro evidence mode = all 351 numbered + SHA-256 cover (40 pages).
