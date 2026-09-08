@@ -20,9 +20,12 @@
     media: $('opt-media'), evidence: $('opt-evidence'), proState: $('pro-state'), proCta: $('pro-cta'),
     buy: $('buy'), buy2: $('buy2'), price: $('price'), licenseForm: $('license-form'), licenseKey: $('license-key'), licenseMsg: $('license-msg'),
     export: $('export'), reset: $('reset'), chatTitle: $('chat-title'), stats: $('stats'), warnings: $('warnings'),
+    loadMoreControls: $('load-more-controls'), loadMore: $('load-more'), loadAll: $('load-all'), loadStatus: $('load-status'),
   };
 
-  const state = { rawText: '', fileName: '', sha256: '', media: new Map(), mediaUrls: new Map(), parsed: null, pro: false };
+  const CHUNK_SIZE = 250;  // messages to show per chunk on screen
+  const state = { rawText: '', fileName: '', sha256: '', media: new Map(), mediaUrls: new Map(), parsed: null, pro: false, chunkIndex: 0, lastDay: '' };
+  let printingFull = false;  // flag to guard against double-restoration
 
   // ---------- Pro / licensing ----------
   function loadLicense() {
@@ -120,6 +123,8 @@
   // ---------- Parse ----------
   function parseAndShow() {
     state.parsed = WAParser.parse(state.rawText, { dateOrder: els.order.value });
+    state.chunkIndex = 0;
+    state.lastDay = '';
     const p = state.parsed;
     els.hero.hidden = true; els.app.hidden = false;
     // populate "me" select
@@ -145,41 +150,34 @@
     return p.messages.filter(m => (!from || m.date >= from) && (!to || m.date <= to) && (!q || (m.text || '').toLowerCase().includes(q) || (m.sender || '').toLowerCase().includes(q)));
   }
 
-  function render() {
-    const p = state.parsed; if (!p) return;
-    const all = currentMessages();
-    const limited = !state.pro && all.length > CONFIG.FREE_LIMIT;
-    const msgs = limited ? all.slice(0, CONFIG.FREE_LIMIT) : all;
-    const me = els.me.value;
-    const evidence = state.pro && els.evidence.checked;
-    const embed = state.pro && els.media.checked && state.media.size > 0;
-    const title = els.title.value || 'WhatsApp chat';
-
-    els.doc.className = 'doc size-' + els.size.value + (els.style.value === 'plain' ? ' plain' : '') + (limited ? ' wm' : '');
-    setPaper(els.paper.value);
-    els.stats.textContent = `${p.messages.length.toLocaleString()} messages · ${p.senders.length} participants · ${fmtDate(p.first)} → ${fmtDate(p.last)} · dates read as ${p.dateOrder}` + (all.length !== p.messages.length ? ` · ${all.length.toLocaleString()} match filters` : '');
-
-    if (limited) {
-      els.notice.hidden = false;
-      els.notice.innerHTML = `Free preview shows the first <strong>${CONFIG.FREE_LIMIT}</strong> of <strong>${all.length.toLocaleString()}</strong> messages with a watermark. <a href="${CONFIG.GUMROAD_PRODUCT_URL || '#pro'}" target="_blank" rel="noopener">Unlock Pro</a> for the full chat.`;
-    } else els.notice.hidden = true;
-
+  // Helper: create document header (running head + cover/title)
+  function docHeader(ctx) {
+    const { title, displayMsgs, evidence, senders } = ctx;
     const frag = document.createDocumentFragment();
     const head = document.createElement('div'); head.className = 'running-head'; head.textContent = `${title} — exported ${fmtDate(new Date())} — ${state.fileName}`; frag.appendChild(head);
-
-    if (evidence) frag.appendChild(coverPage(title, all));
+    if (evidence) frag.appendChild(coverPage(title, displayMsgs));
     else {
       const h = document.createElement('h1'); h.className = 'doc-title'; h.textContent = title; frag.appendChild(h);
       const s = document.createElement('div'); s.className = 'doc-sub';
-      s.textContent = `${p.senders.map(x => x.name).join(', ')} · ${all.length.toLocaleString()} messages · ${fmtDate(all[0] && all[0].date)} – ${fmtDate(all[all.length - 1] && all[all.length - 1].date)}`;
+      s.textContent = `${senders.map(x => x.name).join(', ')} · ${displayMsgs.length.toLocaleString()} messages · ${fmtDate(displayMsgs[0] && displayMsgs[0].date)} – ${fmtDate(displayMsgs[displayMsgs.length - 1] && displayMsgs[displayMsgs.length - 1].date)}`;
       frag.appendChild(s);
     }
+    return frag;
+  }
 
-    let lastDay = '';
-    const numWidth = String(all.length).length;
+  // Message rows for `msgs`; day separators continue across chunks via state.lastDay.
+  function messageRows(msgs, ctx) {
+    const { me, evidence, embed, numWidth, displayMsgs, tailMarkerCount } = ctx;
+    const frag = document.createDocumentFragment();
+    const urlPromises = [];
+
+    // Track day across chunks using state.lastDay
     for (const m of msgs) {
       const day = m.date.toDateString();
-      if (day !== lastDay) { lastDay = day; const d = document.createElement('div'); d.className = 'day'; const sp = document.createElement('span'); sp.textContent = fmtDay(m.date); d.appendChild(sp); frag.appendChild(d); }
+      if (day !== state.lastDay) {
+        state.lastDay = day;
+        const d = document.createElement('div'); d.className = 'day'; const sp = document.createElement('span'); sp.textContent = fmtDay(m.date); d.appendChild(sp); frag.appendChild(d);
+      }
       const row = document.createElement('div');
       row.className = 'msg' + (m.system ? ' system' : (me && m.sender === me ? ' me' : ''));
       const b = document.createElement('div'); b.className = 'bubble';
@@ -189,8 +187,8 @@
       for (const a of m.attachments) {
         const entry = state.media.get(a);
         if (embed && entry && /\.(jpe?g|png|gif|webp)$/i.test(a)) {
-          const img = document.createElement('img'); img.alt = a; img.loading = 'lazy'; b.appendChild(img);
-          objectUrl(a, entry).then(u => { img.src = u; });
+          const img = document.createElement('img'); img.alt = a; img.loading = 'eager'; b.appendChild(img);
+          urlPromises.push(objectUrl(a, entry).then(u => { img.src = u; }));
         } else { const c = document.createElement('span'); c.className = 'att'; c.textContent = '📎 ' + a; b.appendChild(c); }
       }
       if (m.mediaOmitted) { const c = document.createElement('span'); c.className = 'att'; c.textContent = '📎 media (not included in export)'; b.appendChild(c); }
@@ -199,8 +197,89 @@
       const meta = document.createElement('span'); meta.className = 'meta'; meta.textContent = evidence ? fmtDateTime(m.date, m.hasSeconds) : fmtTime(m.date); b.appendChild(meta);
       row.appendChild(b); frag.appendChild(row);
     }
-    if (limited) { const end = document.createElement('div'); end.className = 'day'; const sp = document.createElement('span'); sp.textContent = `… ${(all.length - msgs.length).toLocaleString()} more messages in the full version`; end.appendChild(sp); frag.appendChild(end); }
-    els.doc.replaceChildren(frag);
+
+    // Add free-tier tail marker if requested
+    if (tailMarkerCount > 0) {
+      const end = document.createElement('div'); end.className = 'day'; const sp = document.createElement('span'); sp.textContent = `… ${tailMarkerCount.toLocaleString()} more messages in the full version`; end.appendChild(sp); frag.appendChild(end);
+    }
+
+    return { frag, urlPromises };
+  }
+
+  // Everything the header/rows need for the current filters + tier.
+  function docContext() {
+    const p = state.parsed;
+    const all = currentMessages();
+    const limited = !state.pro && all.length > CONFIG.FREE_LIMIT;
+    const displayMsgs = limited ? all.slice(0, CONFIG.FREE_LIMIT) : all;
+    return {
+      all, limited, displayMsgs, senders: p.senders,
+      me: els.me.value,
+      evidence: state.pro && els.evidence.checked,
+      embed: state.pro && els.media.checked && state.media.size > 0,
+      title: els.title.value || 'WhatsApp chat',
+      numWidth: String(displayMsgs.length).length,
+      hiddenCount: limited ? all.length - displayMsgs.length : 0,
+    };
+  }
+
+  // Render one on-screen chunk. Chunk 0 replaces the document (header + first rows); later chunks append.
+  function renderChunk(chunkIndex) {
+    const p = state.parsed; if (!p) return;
+    const ctx = docContext();
+    const { all, limited, displayMsgs } = ctx;
+    const chunkStart = chunkIndex * CHUNK_SIZE;
+    if (chunkIndex > 0 && chunkStart >= displayMsgs.length) return;  // nothing left to append
+    const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, displayMsgs.length);
+    const hasMore = chunkEnd < displayMsgs.length;
+
+    const frag = document.createDocumentFragment();
+    if (chunkIndex === 0) {
+      els.doc.className = 'doc size-' + els.size.value + (els.style.value === 'plain' ? ' plain' : '') + (limited ? ' wm' : '');
+      setPaper(els.paper.value);
+      els.stats.textContent = `${p.messages.length.toLocaleString()} messages · ${p.senders.length} participants · ${fmtDate(p.first)} → ${fmtDate(p.last)} · dates read as ${p.dateOrder}` + (all.length !== p.messages.length ? ` · ${all.length.toLocaleString()} match filters` : '');
+      if (limited) {
+        els.notice.hidden = false;
+        els.notice.innerHTML = `Free preview shows the first <strong>${CONFIG.FREE_LIMIT}</strong> of <strong>${all.length.toLocaleString()}</strong> messages with a watermark. <a href="${CONFIG.GUMROAD_PRODUCT_URL || '#pro'}" target="_blank" rel="noopener">Unlock Pro</a> for the full chat.`;
+      } else els.notice.hidden = true;
+      state.lastDay = '';
+      frag.appendChild(docHeader(ctx));
+    }
+    frag.appendChild(messageRows(displayMsgs.slice(chunkStart, chunkEnd), { ...ctx, tailMarkerCount: hasMore ? 0 : ctx.hiddenCount }).frag);
+    if (chunkIndex === 0) els.doc.replaceChildren(frag); else els.doc.appendChild(frag);
+
+    state.chunkIndex = chunkIndex;
+    els.loadMoreControls.hidden = !hasMore;
+    if (hasMore) els.loadStatus.textContent = `Showing ${chunkEnd.toLocaleString()} of ${displayMsgs.length.toLocaleString()} messages`;
+  }
+
+  function render() { renderChunk(0); }
+
+  // Re-render chunks 0..upTo (used to restore the screen after printing).
+  function renderChunksUpTo(upTo) {
+    if (!state.parsed) return;
+    const total = docContext().displayMsgs.length;
+    renderChunk(0);
+    for (let i = 1; i <= upTo && i * CHUNK_SIZE < total; i++) renderChunk(i);
+  }
+
+  // Full document for printing: header + every displayable row + free-tier tail marker.
+  function buildFullDocument() {
+    if (!state.parsed) return null;
+    const ctx = docContext();
+    const frag = document.createDocumentFragment();
+    frag.appendChild(docHeader(ctx));
+    state.lastDay = '';
+    const { frag: rows, urlPromises } = messageRows(ctx.displayMsgs, { ...ctx, tailMarkerCount: ctx.hiddenCount });
+    frag.appendChild(rows);
+    return { frag, urlPromises };
+  }
+
+  function showFullDocument() {
+    const result = buildFullDocument(); if (!result) return null;
+    els.doc.replaceChildren(result.frag);
+    els.loadMoreControls.hidden = true;
+    return result;
   }
 
   function coverPage(title, all) {
@@ -262,10 +341,55 @@
   function fmtTime(d) { return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }
   function fmtDateTime(d, secs) { return d ? `${isoDate(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}${secs ? ':' + pad(d.getSeconds()) : ''}` : ''; }
 
+  // ---------- Print handling ----------
+  // Ctrl+P / File > Print: swap in the full document synchronously, restore the chunked view afterwards.
+  let printedViaShortcut = false;
+  window.addEventListener('beforeprint', () => {
+    if (printingFull || !state.parsed) return;
+    if (els.doc.querySelectorAll('.msg').length < docContext().displayMsgs.length) { printedViaShortcut = true; showFullDocument(); }
+  });
+  window.addEventListener('afterprint', () => {
+    if (printingFull || !printedViaShortcut) return;
+    printedViaShortcut = false;
+    renderChunksUpTo(state.chunkIndex);
+  });
+
+  // ---------- Load-more handlers ----------
+  els.loadMore.addEventListener('click', () => {
+    const last = els.doc.lastElementChild;
+    renderChunk(state.chunkIndex + 1);
+    if (last && last.nextElementSibling) last.nextElementSibling.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  els.loadAll.addEventListener('click', () => {
+    const total = docContext().displayMsgs.length;
+    while ((state.chunkIndex + 1) * CHUNK_SIZE < total) renderChunk(state.chunkIndex + 1);
+  });
+
+  // ---------- PDF export: full render off-DOM, wait for images, print, restore chunked view ----------
+  async function exportPdf() {
+    if (!state.parsed) return;
+    const savedChunk = state.chunkIndex;
+    printingFull = true;
+    els.export.disabled = true; els.export.textContent = 'Preparing PDF…';
+    try {
+      const result = showFullDocument(); if (!result) return;
+      await Promise.all(result.urlPromises);
+      await Promise.allSettled(Array.from(els.doc.querySelectorAll('img')).map(img => img.decode ? img.decode() : Promise.resolve()));
+      await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));  // let layout settle
+      const done = new Promise(r => window.addEventListener('afterprint', r, { once: true }));
+      window.print();
+      await done;
+    } finally {
+      printingFull = false;
+      renderChunksUpTo(savedChunk);
+      els.export.disabled = false; els.export.textContent = 'Save as PDF';
+    }
+  }
+
   // ---------- Wiring ----------
   ['title', 'me', 'from', 'to', 'search', 'paper', 'size', 'style', 'media', 'evidence'].forEach(k => els[k].addEventListener(k === 'search' || k === 'title' ? 'input' : 'change', debounce(render, 150)));
   els.order.addEventListener('change', parseAndShow);
-  els.export.addEventListener('click', () => { window.print(); });
+  els.export.addEventListener('click', exportPdf);
   els.reset.addEventListener('click', () => { resetMedia(); state.parsed = null; state.rawText = ''; els.file.value = ''; els.title.value = ''; els.from.value = ''; els.to.value = ''; els.search.value = ''; els.app.hidden = true; els.hero.hidden = false; });
   function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }
 

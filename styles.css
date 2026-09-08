@@ -45,6 +45,9 @@ code{background:#eef0f3;padding:.1em .35em;border-radius:4px;font-size:.92em}
 .btn-ghost{background:transparent;border-color:transparent;color:var(--muted);width:100%;margin-top:6px}
 .big{width:100%;padding:12px;font-size:1.05em;margin-top:12px}
 .preview{min-width:0}
+.load-controls{text-align:center;padding:16px;background:#f9fafb;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+.load-controls .btn{width:100%;max-width:400px;margin:0 auto}
+.load-status{font-size:.85em;color:var(--muted)}
 .notice{background:#fff7ed;border:1px solid #fed7aa;color:#7c2d12;padding:10px 14px;border-radius:10px;margin-bottom:12px;font-size:.92em}
 .notice a{color:inherit;font-weight:700}
 .doc{background:#fff;border:1px solid var(--line);border-radius:var(--radius);padding:28px;box-shadow:0 1px 3px rgba(0,0,0,.05);position:relative;overflow:hidden;font-size:15px}
@@ -96,7 +99,7 @@ code{background:#eef0f3;padding:.1em .35em;border-radius:4px;font-size:.92em}
 .doc.a4{--paper:a4}
 @media print{
   body{background:#fff}
-  header,footer,.hero,.info,.panel,.notice,#reset{display:none!important}
+  header,footer,.hero,.info,.panel,.notice,#reset,.load-controls{display:none!important}
   .wrap{max-width:none;padding:0}
   .app{display:block;margin:0}
   .doc{border:0;padding:0;box-shadow:none;border-radius:0;overflow:visible}

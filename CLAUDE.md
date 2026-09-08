@@ -3,6 +3,12 @@
 Static site, no build. `index.html` + `styles.css` + `parser.js` (UMD, browser + Node) + `app.js`.
 Pro unlock = Gumroad license key verified client-side (`api.gumroad.com/v2/licenses/verify`, CORS `*` confirmed 2026-09-07). Config block at top of `app.js`.
 
+## Rendering model (app.js, 2026-09-08)
+- Screen shows `CHUNK_SIZE` (250) messages per chunk; `renderChunk(i)` (0 replaces, >0 appends), `render()` = chunk 0. `#load-more`/`#load-all` buttons in `#load-more-controls`. Day separators continue across chunks via `state.lastDay`.
+- Shared builders: `docContext()` (filters/tier → ctx), `docHeader(ctx)`, `messageRows(msgs, ctx)`; `buildFullDocument()`/`showFullDocument()` render everything for print. Never duplicate the row loop.
+- Print: `exportPdf()` (button) swaps in the full doc, awaits object URLs + `img.decode()`, `window.print()`, restores chunks via `renderChunksUpTo()`. `beforeprint` handles Ctrl+P the same way synchronously (`printingFull` guard prevents double handling). Free-tier tail marker ("… N more messages in the full version") appears after the last on-screen chunk and in the PDF.
+- Large synthetic export for perf tests: scratchpad `gen-large.js` → `large-export.txt` (30k msgs), not committed.
+
 ## Commands
 - Tests: `~/.nvm/versions/node/v26.8.1/bin/node test/parser.test.mjs` (default `node` is v14 and fails on `node:assert/strict`).
 - Local: `python3 -m http.server 8080 --bind 127.0.0.1`; `?sample=1` loads `test/sample-ios.txt`.
