@@ -36,7 +36,7 @@
       },
     };
   }
-  async function batched(items, initialSize, invoke, onBatch) {
+  async function batched(items, initialSize, invoke, onBatch, isFatal) {
     const output = [];
     for (let offset = 0; offset < items.length;) {
       let size = Math.min(initialSize, items.length - offset);
@@ -49,7 +49,7 @@
           if (onBatch) onBatch(offset, items.length, size);
           break;
         } catch (error) {
-          if (size === 1) throw error;
+          if ((isFatal && isFatal(error)) || size === 1) throw error;
           size = Math.max(1, Math.floor(size / 2));
         }
       }

@@ -7,8 +7,10 @@ const MODELS = Object.freeze({
   text: { task: 'zero-shot-classification', id: 'Xenova/mobilebert-uncased-mnli', revision: '8b0ea66ab7b190bba77418ba03b67d69cfc9a1ee' },
   image: { task: 'zero-shot-image-classification', id: 'Xenova/clip-vit-base-patch32', revision: 'd15189d7028b43f1d3e65039190477f6af591c2a' },
 });
-let activeRun = null, transformersPromise = null, rememberedWasm = false;
+let activeRun = null, pendingRun = null, transformersPromise = null, rememberedWasm = false;
 let pipelines = { device: null, toxicity: null, text: null, image: null, textSupportsHandBatch: false, RawImage: null };
+let scoreCache = new Map(), cacheEpoch = '', cacheSize = 0;
+const MAX_CACHE_ENTRIES = 200000;
 const nativeFetch = self.fetch.bind(self);
 const allowedModelPrefixes = Object.values(MODELS).map(model => `https://huggingface.co/${model.id}/resolve/${model.revision}/`);
 self.fetch = function guardedFetch(input, init) {
@@ -103,6 +105,33 @@ function askImages(names, token) {
     emit('image-batch-request', token.runId, { names });
   });
 }
+function getCacheKey(model, text, label) {
+  return `${model}:${text}:${label || ''}`;
+}
+function getCachedScore(model, text, label) {
+  if (!text || cacheEpoch !== getCacheEpoch()) return null;
+  const key = getCacheKey(model, text, label);
+  return scoreCache.get(key);
+}
+function setCachedScore(model, text, label, score) {
+  if (!text || !scoreCache) return;
+  const cacheEpochNow = getCacheEpoch();
+  if (cacheEpoch !== cacheEpochNow) {
+    scoreCache.clear(); cacheSize = 0; cacheEpoch = cacheEpochNow;
+  }
+  const key = getCacheKey(model, text, label);
+  if (!scoreCache.has(key)) {
+    if (cacheSize >= MAX_CACHE_ENTRIES) {
+      const firstKey = scoreCache.keys().next().value;
+      scoreCache.delete(firstKey); cacheSize--;
+    }
+    cacheSize++;
+  }
+  scoreCache.set(key, score);
+}
+function getCacheEpoch() {
+  return `${SafePolicy.VERSION}:${pipelines.device || 'none'}`;
+}
 
 async function analyse(data, token) {
   const totalStarted = performance.now(), timings = { initialization: 0, text: 0, image: 0, total: 0 };
@@ -180,14 +209,23 @@ async function analyse(data, token) {
 onmessage = ({ data }) => {
   if (data.type === 'cancel') {
     if (activeRun && (!data.runId || data.runId === activeRun.runId)) { activeRun.cancelled = true; if (activeRun.imageReject) activeRun.imageReject(new Error('Cancelled')); }
+    if (pendingRun && data.runId === pendingRun.runId) pendingRun = null;
     return;
   }
   if (data.type === 'image-batch-response') {
     if (activeRun && data.runId === activeRun.runId && activeRun.imageResolve) { const resolve = activeRun.imageResolve; activeRun.imageResolve = activeRun.imageReject = null; resolve(data.buffers || []); }
     return;
   }
-  if (data.type !== 'analyse' || activeRun) return;
-  const token = { runId: data.runId, cancelled: false }; activeRun = token;
-  analyse(data, token).catch(error => { if (!token.cancelled) emit('error', token.runId, { message: error.message || String(error), fatal: true }); }).finally(() => { if (activeRun === token) activeRun = null; });
+  if (data.type !== 'analyse') return;
+  if (!activeRun) {
+    const token = { runId: data.runId, cancelled: false }; activeRun = token;
+    analyse(data, token).catch(error => { if (!token.cancelled) emit('error', token.runId, { message: error.message || String(error), fatal: true }); }).finally(() => {
+      emit('cancelled', token.runId, {});
+      if (activeRun === token) activeRun = null;
+      if (pendingRun) { const next = pendingRun; pendingRun = null; self.postMessage(next); }
+    });
+  } else {
+    activeRun.cancelled = true; pendingRun = data; if (activeRun.imageReject) activeRun.imageReject(new Error('Cancelled'));
+  }
 };
 emit('ready', null, { policyVersion: SafePolicy.VERSION, models: MODELS });

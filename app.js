@@ -168,18 +168,21 @@
     else if (!blocked && /^Safe mode export is blocked/.test(els.exportStatus.textContent)) els.exportStatus.textContent = '';
   }
   function invalidateSafe(message) {
-    if (state.safe.status === 'scanning') destroySafeWorker(true);
+    if (state.safe.status === 'scanning') destroySafeWorker(true, true);
     state.safe.fingerprint = ''; state.safe.status = els.safe && els.safe.checked ? 'stale' : 'idle';
     state.safe.findings.clear(); state.safe.excludedIds.clear(); state.safe.unanalysed = [];
     if (els.safeStatus && els.safe.checked) els.safeStatus.textContent = message || 'Options changed. Analyse again before exporting.';
     if (state.parsed) { updateSafeExportState(); render(); }
   }
-  function destroySafeWorker(cancel) {
+  function destroySafeWorker(cancel, keepWorker) {
     const worker = state.safe.worker, runId = state.safe.activeRunId;
-    state.safe.worker = null; state.safe.workerReady = false; state.safe.activeRunId = 0;
-    if (!worker) return;
-    if (cancel && runId) worker.postMessage({ type: 'cancel', runId });
-    worker.terminate();
+    if (cancel && runId && worker) worker.postMessage({ type: 'cancel', runId });
+    if (!keepWorker) {
+      state.safe.worker = null; state.safe.workerReady = false; state.safe.activeRunId = 0;
+      if (worker) worker.terminate();
+    } else {
+      state.safe.activeRunId = 0;
+    }
   }
   function resetSafeMode(uncheck) {
     if (state.safe) destroySafeWorker(true);
@@ -190,7 +193,7 @@
     updateSafeExportState();
   }
   function safeFailure(message) {
-    destroySafeWorker(false); state.safe.status = 'error';
+    destroySafeWorker(false, true); state.safe.status = 'error';
     els.safeCancel.hidden = true; els.safeAnalyse.disabled = false;
     els.safeStatus.replaceChildren(document.createTextNode(`Safe mode failed: ${message} `));
     const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'link-button'; retry.textContent = 'Retry'; retry.onclick = startSafeScan;
@@ -761,7 +764,7 @@
   els.safeTerms.addEventListener('input', () => invalidateSafe('Custom terms changed. Analyse again before exporting.'));
   els.safeAnalyse.addEventListener('click', () => ['review', 'applied'].includes(state.safe.status) ? openSafeReview() : startSafeScan());
   els.safeCancel.addEventListener('click', () => {
-    if (state.safe.status !== 'scanning') return; destroySafeWorker(true);
+    if (state.safe.status !== 'scanning') return; destroySafeWorker(true, true);
     state.safe.status = 'stale'; els.safeCancel.hidden = true; els.safeAnalyse.disabled = false; els.safeStatus.textContent = 'Analysis cancelled. Analyse again before exporting.'; updateSafeExportState();
   });
   els.safeSelectAll.addEventListener('click', () => els.safeReviewList.querySelectorAll('[name="safe-remove"]').forEach(x => { x.checked = true; }));
