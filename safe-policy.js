@@ -6,7 +6,7 @@
 })(typeof self !== 'undefined' ? self : globalThis, function () {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
   const THRESHOLDS = Object.freeze({ text: 0.30, image: 0.25 });
   const LABELS = Object.freeze({
     abuse: 'Abuse, hate, and threats', sexual: 'Sexual or explicit content',
@@ -20,12 +20,14 @@
     drugs: ['cocaine', 'heroin', 'meth', 'drug deal', 'gun', 'firearm', 'ammunition'],
     crime: ['money laundering', 'stolen card', 'credit card fraud', 'scam them', 'fake invoice', 'break in'],
   });
+  const PLACEHOLDER = /^(media omitted|image omitted|video omitted|audio omitted|gif omitted|sticker omitted|document omitted|contact card omitted|this message was deleted|you deleted this message|missed voice call|missed video call)$/;
 
   function normalize(value) {
     return String(value || '').normalize('NFKC').toLocaleLowerCase('und')
       .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '').replace(/\p{M}/gu, '')
       .replace(/[’‘`]/g, "'").replace(/[^\p{L}\p{N}'\n]+/gu, ' ').replace(/[ \t]+/g, ' ').trim();
   }
+  function isScannable(key) { return !!key && !PLACEHOLDER.test(key) && /\p{L}{2}/u.test(key); }
   function customTerms(value) {
     return [...new Set(String(value || '').split(/\r?\n/).map(normalize).filter(Boolean))];
   }
@@ -34,16 +36,20 @@
     const haystack = ` ${normalize(text)} `, needle = ` ${term} `;
     return haystack.includes(needle);
   }
-  function ruleFindings(text, categories, terms) {
+  const NORMALIZED_RULES = Object.freeze(Object.fromEntries(Object.entries(RULES).map(([category, words]) => [category, words.map(normalize)])));
+  function ruleFindingsNormalized(paddedHaystack, categories, terms) {
     const selected = new Set(categories || []), findings = [];
-    for (const [category, words] of Object.entries(RULES)) {
+    for (const [category, words] of Object.entries(NORMALIZED_RULES)) {
       if (!selected.has(category)) continue;
-      const hit = words.find(word => hasTerm(text, normalize(word)));
+      const hit = words.find(word => paddedHaystack.includes(` ${word} `));
       if (hit) findings.push({ category, reason: `Matched risk phrase: “${hit}”`, score: 1, source: 'rule' });
     }
-    const custom = (terms || []).find(term => hasTerm(text, term));
+    const custom = (terms || []).find(term => paddedHaystack.includes(` ${term} `));
     if (custom) findings.push({ category: 'custom', reason: `Matched custom term: “${custom}”`, score: 1, source: 'custom' });
     return findings;
+  }
+  function ruleFindings(text, categories, terms) {
+    return ruleFindingsNormalized(` ${normalize(text)} `, categories, terms);
   }
   function mergeFindings(findings) {
     const merged = new Map();
@@ -59,5 +65,5 @@
     for (let i = 0; i < text.length; i++) { hash ^= text.charCodeAt(i); hash = Math.imul(hash, 16777619); }
     return `${VERSION}-${(hash >>> 0).toString(16).padStart(8, '0')}`;
   }
-  return { VERSION, THRESHOLDS, LABELS, RULES, normalize, customTerms, hasTerm, ruleFindings, mergeFindings, stableFingerprint };
+  return { VERSION, THRESHOLDS, LABELS, RULES, normalize, isScannable, customTerms, hasTerm, ruleFindings, ruleFindingsNormalized, mergeFindings, stableFingerprint };
 });

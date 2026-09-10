@@ -1,18 +1,19 @@
 const assert = require('node:assert/strict');
 const scheduler = require('../safe-scheduler.js');
+const normalize = text => String(text || '').toLowerCase().trim();
 
 (async () => {
   let classifications = 0;
   const messages = [
     { id: 3, text: 'same', attachments: ['a.jpg'] },
-    { id: 1, text: 'same', attachments: ['a.jpg'] },
+    { id: 1, text: 'Same', attachments: ['a.jpg'] },
     { id: 2, text: 'hola', attachments: ['missing.jpg'] },
     { id: 4, text: '', attachments: ['ignored.jpg'] },
     { id: 5, text: 'deleted', deleted: true },
   ];
-  const prepared = scheduler.preprocess(messages, text => { classifications++; return text !== 'hola'; });
+  const prepared = scheduler.preprocess(messages, (text, key) => { classifications++; return key !== 'hola'; }, key => key !== 'hola', normalize);
   assert.equal(classifications, 2);
-  assert.deepEqual(prepared.groups.map(x => [x.text, x.owners.map(y => y.id), x.english]), [['same', [3, 1], true], ['hola', [2], false]]);
+  assert.deepEqual(prepared.groups.map(x => [x.text, x.owners.map(y => y.id), x.english, x.scannable]), [['same', [3, 1], true, true], ['hola', [2], false, false]]);
   assert.deepEqual([...prepared.attachmentOwners].map(([name, owners]) => [name, owners.map(x => x.id)]), [['a.jpg', [3, 1]], ['missing.jpg', [2]]]);
 
   const calls = [];
@@ -33,5 +34,11 @@ const scheduler = require('../safe-scheduler.js');
   ]);
   assert.deepEqual(reordered.map(x => x.messageId), [1, 2]);
   assert.equal('_messageIndex' in reordered[0], false);
+
+  const items = ['ccc', 'a', 'bb', 'a', 'dddd'];
+  const bucket = scheduler.bucketed(items, s => s.length);
+  assert.deepEqual(bucket.items, ['a', 'a', 'bb', 'ccc', 'dddd']);
+  assert.deepEqual(bucket.restore(bucket.items.map(s => s.toUpperCase())), items.map(s => s.toUpperCase()));
+  await assert.rejects(() => scheduler.batched([1], 1, async () => [10, 20]), /batched: invoke returned/);
   console.log('safe scheduler tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

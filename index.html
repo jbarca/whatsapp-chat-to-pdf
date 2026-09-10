@@ -192,7 +192,7 @@
 
 <section id="faq" class="info">
   <h2>FAQ</h2>
-  <details open><summary>Is my chat really not uploaded?</summary><p>Correct. Your messages and photos are processed on this device. The page downloads its scripts and PDF font, but never uploads your chat. Activating Pro sends just the license key to the store. You can verify this in your browser's Network tab or read the source.</p></details>
+  <details open><summary>Is my chat really not uploaded?</summary><p>Correct. Your messages and photos are processed on this device. The page downloads its scripts and PDF font, but never uploads your chat. Activating Pro sends just the license key to the store. On first load, a service worker installs to enable faster screening; it never touches your chat data. You can verify this in your browser's Network tab or read the source.</p></details>
   <details><summary>How does Safe mode protect my privacy?</summary><p>Safe mode sends no chat content anywhere. Version-pinned, quantized screening models are downloaded with GET requests, cached by your browser, and run on this device. Findings, images and review decisions remain in memory and disappear when the page closes. Screening can miss or misclassify content and is not legal advice.</p></details>
   <details><summary>Which models does Safe mode use?</summary><p>Transformers.js 3.8.1 with pinned revisions of a multilingual toxicity classifier, MobileBERT MNLI, and CLIP ViT-B/32. Model and runtime licence notices are listed in <a href="vendor/README.md">vendor notices</a>.</p></details>
   <details><summary>Can I use the PDF as evidence in court, a tribunal or an HR complaint?</summary><p>Many people do. Evidence mode produces the things reviewers usually want: unbroken sequential numbering, exact timestamps, participants, the date range, and a SHA-256 fingerprint of the original export file so you can show the PDF matches the file from your phone. Keep the original export too. This isn't legal advice — check what your jurisdiction or lawyer requires.</p></details>
@@ -213,6 +213,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" crossorigin="anonymous"></script>
 <script src="parser.js"></script>
 <script src="safe-policy.js"></script>
+<script src="vendor/coi-serviceworker-0.1.7.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -8,7 +8,7 @@ const MODELS = Object.freeze({
   image: { task: 'zero-shot-image-classification', id: 'Xenova/clip-vit-base-patch32', revision: 'd15189d7028b43f1d3e65039190477f6af591c2a' },
 });
 let activeRun = null, transformersPromise = null, rememberedWasm = false;
-let pipelines = { device: null, toxicity: null, text: null, image: null, RawImage: null };
+let pipelines = { device: null, toxicity: null, text: null, image: null, textSupportsHandBatch: false, RawImage: null };
 const nativeFetch = self.fetch.bind(self);
 const allowedModelPrefixes = Object.values(MODELS).map(model => `https://huggingface.co/${model.id}/resolve/${model.revision}/`);
 self.fetch = function guardedFetch(input, init) {
@@ -25,8 +25,8 @@ self.fetch = function guardedFetch(input, init) {
 function emit(type, runId, data) { postMessage(Object.assign({ type, runId }, data)); }
 function progress(token, phase, completed, total, message, detail) { emit('progress', token.runId, { phase, completed, total, message, detail: detail || null }); }
 function check(token) { if (token.cancelled || activeRun !== token) throw new Error('Cancelled'); }
-function isEnglish(text) {
-  const normalized = ` ${SafePolicy.normalize(text)} `;
+function isEnglish(text, key) {
+  const normalized = ` ${key != null ? key : SafePolicy.normalize(text)} `;
   if (/\b(hola|gracias|por favor|bonjour|merci|salut|avec|und|danke|bitte|hallo|ciao|grazie|buongiorno|ola|obrigado|voce|namaste|terima kasih)\b/.test(normalized)) return false;
   const letters = String(text || '').match(/\p{L}/gu) || [];
   if (!letters.length) return true;
@@ -50,8 +50,20 @@ async function transformers(token) {
   if (!transformersPromise) transformersPromise = import('./vendor/transformers-3.8.1.min.js');
   const t = await transformersPromise; check(token);
   t.env.allowLocalModels = false; t.env.useBrowserCache = true;
-  t.env.backends.onnx.wasm.numThreads = self.crossOriginIsolated ? Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1)) : 1;
+  t.env.backends.onnx.wasm.wasmPaths = new URL('./vendor/', location.href).href;
+  t.env.backends.onnx.wasm.numThreads = self.crossOriginIsolated ? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1)) : 1;
   return t;
+}
+const HYPOTHESIS = label => `This example is ${label}.`;
+async function mnliScores(pipe, pairs, maxLength) {
+  const enc = pipe.tokenizer(pairs.map(p => p.premise), {
+    text_pair: pairs.map(p => p.hypothesis), padding: true, truncation: true, max_length: maxLength });
+  const { logits } = await pipe.model(enc);
+  const width = logits.dims[1], data = logits.data;
+  return pairs.map((_, row) => {
+    const c = data[row * width + pipe.contradiction_id], e = data[row * width + pipe.entailment_id];
+    return 1 / (1 + Math.exp(c - e));
+  });
 }
 async function ensurePipelines(categories, imageEnabled, token) {
   const need = { toxicity: categories.includes('abuse'), text: categories.some(x => !['images', 'abuse'].includes(x)), image: imageEnabled };
@@ -61,7 +73,7 @@ async function ensurePipelines(categories, imageEnabled, token) {
   const t = await transformers(token);
   const preferred = rememberedWasm || !(typeof navigator !== 'undefined' && navigator.gpu) ? 'wasm' : 'webgpu';
   const createMissing = async device => {
-    if (pipelines.device && pipelines.device !== device) pipelines = { device: null, toxicity: null, text: null, image: null, RawImage: t.RawImage };
+    if (pipelines.device && pipelines.device !== device) pipelines = { device: null, toxicity: null, text: null, image: null, textSupportsHandBatch: false, RawImage: t.RawImage };
     pipelines.device = device; pipelines.RawImage = t.RawImage;
     let complete = 0;
     for (const key of ['toxicity', 'text', 'image']) if (need[key]) {
@@ -70,13 +82,16 @@ async function ensurePipelines(categories, imageEnabled, token) {
         revision: MODELS[key].revision, dtype: 'q8', device,
         progress_callback: p => { check(token); if (p.status === 'progress') progress(token, 'initialization', complete, total, `Downloading models… ${Math.round(p.progress || 0)}%`, p); },
       });
+      if (key === 'text' && typeof pipelines[key].entailment_id === 'number' && typeof pipelines[key].contradiction_id === 'number') {
+        pipelines.textSupportsHandBatch = true;
+      }
       complete++; progress(token, 'initialization', complete, total, 'Preparing screening models…');
     }
   };
   try { await createMissing(preferred); }
   catch (error) {
     if (preferred !== 'webgpu' || token.cancelled) throw error;
-    rememberedWasm = true; pipelines = { device: null, toxicity: null, text: null, image: null, RawImage: t.RawImage };
+    rememberedWasm = true; pipelines = { device: null, toxicity: null, text: null, image: null, textSupportsHandBatch: false, RawImage: t.RawImage };
     progress(token, 'initialization', 0, total, 'WebGPU unavailable for this model; retrying with WASM…');
     await createMissing('wasm');
   }
@@ -92,27 +107,41 @@ function askImages(names, token) {
 async function analyse(data, token) {
   const totalStarted = performance.now(), timings = { initialization: 0, text: 0, image: 0, total: 0 };
   const categories = data.categories || [], terms = SafePolicy.customTerms(data.customTerms);
-  const { groups, attachmentOwners } = SafeScheduler.preprocess(data.messages || [], isEnglish);
+  const { groups, attachmentOwners } = SafeScheduler.preprocess(data.messages || [], isEnglish, SafePolicy.isScannable, SafePolicy.normalize);
   const findings = [];
-  for (const group of groups) for (const owner of group.owners) for (const item of SafePolicy.ruleFindings(group.text, categories, terms)) findings.push(Object.assign({ messageId: owner.id, _messageIndex: owner.index, _phase: 0 }, item));
+  for (const group of groups) {
+    const groupFindings = SafePolicy.ruleFindingsNormalized(` ${group.key} `, categories, terms);
+    for (const owner of group.owners) for (const item of groupFindings) findings.push(Object.assign({ messageId: owner.id, _messageIndex: owner.index, _phase: 0 }, item));
+  }
   const loaded = await ensurePipelines(categories, !!data.scanImages, token);
   const pipes = loaded.pipes; timings.initialization = loaded.duration; check(token);
-  const textStarted = performance.now(), batchSize = pipes.device === 'webgpu' ? 16 : 8;
+  const textStarted = performance.now(), batchSize = pipes.device === 'webgpu' ? 32 : 16;
   const labels = categories.filter(x => x !== 'images').map(x => SafePolicy.LABELS[x]);
+  const scannableGroups = groups.filter(group => group.scannable);
   if (pipes.toxicity) {
-    const results = await SafeScheduler.batched(groups, batchSize, async batch => {
+    const toxBucket = SafeScheduler.bucketed(scannableGroups, g => g.text.length);
+    const results = await SafeScheduler.batched(toxBucket.items, batchSize, async batch => {
       check(token); return arrayResult(await pipes.toxicity(batch.map(x => x.text), { top_k: null }), batch.length);
-    }, done => progress(token, 'text', done, groups.length, `Screening text ${done} of ${groups.length}…`));
-    findings.push(...SafeScheduler.fanOut(groups, results, result => (result || []).flatMap(item => {
+    }, done => progress(token, 'text', done, scannableGroups.length, `Screening text ${done} of ${scannableGroups.length}…`));
+    findings.push(...SafeScheduler.fanOut(scannableGroups, toxBucket.restore(results), result => (result || []).flatMap(item => {
       const category = categoryForLabel(item.label);
       return category === 'abuse' && item.score >= SafePolicy.THRESHOLDS.text ? [{ category, reason: `Multilingual toxicity model: ${item.label}`, score: item.score, source: 'model', _phase: 1 }] : [];
     })));
   }
-  const englishGroups = groups.filter(group => group.english);
+  const englishGroups = scannableGroups.filter(group => group.english);
   if (pipes.text && labels.length) {
-    const results = await SafeScheduler.batched(englishGroups, batchSize, async batch => {
-      check(token); return objectResult(await pipes.text(batch.map(x => x.text), labels, { multi_label: true }), batch.length);
-    }, done => progress(token, 'text', done, englishGroups.length, `Screening text ${done} of ${englishGroups.length}…`));
+    let results;
+    if (pipes.textSupportsHandBatch) {
+      const pairs = [];
+      for (const group of englishGroups) for (const label of labels) pairs.push({ premise: group.text, hypothesis: HYPOTHESIS(label) });
+      const scores = await mnliScores(pipes.text, pairs, 128); check(token);
+      results = [];
+      for (let g = 0; g < englishGroups.length; g++) results.push({ labels: labels.slice(), scores: scores.slice(g * labels.length, (g + 1) * labels.length) });
+    } else {
+      results = await SafeScheduler.batched(englishGroups, batchSize, async batch => {
+        check(token); return objectResult(await pipes.text(batch.map(x => x.text), labels, { multi_label: true }), batch.length);
+      }, done => progress(token, 'text', done, englishGroups.length, `Screening text ${done} of ${englishGroups.length}…`));
+    }
     findings.push(...SafeScheduler.fanOut(englishGroups, results, result => (result.labels || []).flatMap((label, index) => {
       const category = categoryForLabel(label);
       return category && result.scores[index] >= SafePolicy.THRESHOLDS.text ? [{ category, reason: `Text model: ${label}`, score: result.scores[index], source: 'model', _phase: 2 }] : [];
@@ -144,7 +173,8 @@ async function analyse(data, token) {
     offset += names.length; progress(token, 'image', offset, imageNames.length, `Screening images ${offset} of ${imageNames.length}…`);
   }
   timings.image = elapsed(imageStarted); timings.total = elapsed(totalStarted); check(token);
-  emit('complete', token.runId, { findings: SafePolicy.mergeFindings(SafeScheduler.ordered(findings)), unanalysed, partialCoverage: groups.some(group => !group.english), device: pipes.device, policyVersion: SafePolicy.VERSION, timings });
+  const partialCoverage = labels.length ? scannableGroups.some(group => !group.english) : false;
+  emit('complete', token.runId, { findings: SafePolicy.mergeFindings(SafeScheduler.ordered(findings)), unanalysed, partialCoverage, device: pipes.device, policyVersion: SafePolicy.VERSION, timings });
 }
 
 onmessage = ({ data }) => {

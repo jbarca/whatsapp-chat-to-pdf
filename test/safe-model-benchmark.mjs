@@ -12,7 +12,7 @@ if (process.env.SAFE_MODEL_BENCH !== '1') {
 
 const require = createRequire(import.meta.url), { chromium } = require('playwright');
 const root = await realpath(fileURLToPath(new URL('../', import.meta.url)));
-const types = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json', '.wasm': 'application/wasm' };
+const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.wasm': 'application/wasm', '.ttf': 'font/ttf' };
 const server = createServer(async (req, res) => {
   try {
     const path = await realpath(join(root, decodeURIComponent(req.url.split('?')[0]).replace(/^\/+/, '')));

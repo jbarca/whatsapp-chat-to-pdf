@@ -1,7 +1,9 @@
 # Vendored browser dependencies
 
-Served from this site; loaded only by the PDF worker. No build step required.
+Served from this site; loaded only by the PDF worker and service worker. No build step required.
 
+- `coi-serviceworker-0.1.7.js`: Cross-Origin-Isolation service worker helper, enables `crossOriginIsolated` by setting COOP/COEP headers. MIT license.
+  SHA-256: `d3fb4cfb0654a3a7c05d8cd43658dbb2123e7547d0dc279891d889f714039802`.
 - `jspdf-4.2.1.umd.min.js`: jsPDF **4.2.1**, from `dist/jspdf.umd.min.js` in <https://registry.npmjs.org/jspdf/-/jspdf-4.2.1.tgz>. MIT license: `jspdf-LICENSE.txt`.
   SHA-256: `e6551fcdc32f09d6853b2c5126d18d01d9447e0da618a41a11ebeee0f6c20d54`.
 - `NotoSans-Regular.ttf`: Noto Sans, from <https://github.com/notofonts/noto-fonts/blob/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf>. SIL Open Font License 1.1: `NotoSans-LICENSE.txt`.

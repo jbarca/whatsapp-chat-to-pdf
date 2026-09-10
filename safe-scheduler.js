@@ -5,13 +5,17 @@
   root.SafeScheduler = api;
 })(typeof self !== 'undefined' ? self : globalThis, function () {
   'use strict';
-  function preprocess(messages, classifyLanguage) {
-    const groups = [], byText = new Map(), attachmentOwners = new Map();
+  function preprocess(messages, classifyLanguage, isScannable, normalize) {
+    const groups = [], byKey = new Map(), attachmentOwners = new Map();
     for (let index = 0; index < (messages || []).length; index++) {
       const message = messages[index];
       if (!message || message.deleted || !message.text) continue;
-      let group = byText.get(message.text);
-      if (!group) { group = { text: message.text, english: classifyLanguage(message.text), owners: [] }; byText.set(message.text, group); groups.push(group); }
+      const key = normalize(message.text);
+      let group = byKey.get(key);
+      if (!group) {
+        group = { text: message.text, key, english: classifyLanguage(message.text, key), scannable: isScannable(key), owners: [] };
+        byKey.set(key, group); groups.push(group);
+      }
       group.owners.push({ id: message.id, index });
       for (const name of message.attachments || []) {
         let owners = attachmentOwners.get(name);
@@ -21,13 +25,26 @@
     }
     return { groups, attachmentOwners };
   }
+  function bucketed(items, sizeOf) {
+    const order = items.map((_, i) => i).sort((a, b) => (sizeOf(items[a]) - sizeOf(items[b])) || (a - b));
+    return {
+      items: order.map(i => items[i]),
+      restore(results) {
+        const out = new Array(items.length);
+        for (let p = 0; p < order.length; p++) out[order[p]] = results[p];
+        return out;
+      },
+    };
+  }
   async function batched(items, initialSize, invoke, onBatch) {
     const output = [];
     for (let offset = 0; offset < items.length;) {
       let size = Math.min(initialSize, items.length - offset);
       while (true) {
         try {
-          const result = await invoke(items.slice(offset, offset + size));
+          const batch = items.slice(offset, offset + size);
+          const result = await invoke(batch);
+          if (result.length !== batch.length) throw new Error(`batched: invoke returned ${result.length} results for a batch of ${batch.length}`);
           output.push(...result); offset += size;
           if (onBatch) onBatch(offset, items.length, size);
           break;
@@ -52,5 +69,5 @@
       (a.finding._messageIndex - b.finding._messageIndex) || ((a.finding._phase || 0) - (b.finding._phase || 0)) || a.sequence - b.sequence
     ).map(({ finding }) => { const clean = Object.assign({}, finding); delete clean._messageIndex; delete clean._phase; return clean; });
   }
-  return { preprocess, batched, fanOut, ordered };
+  return { preprocess, batched, bucketed, fanOut, ordered };
 });
