@@ -247,11 +247,12 @@
     if (state.safe.workerReady) send();
   }
   function openSafeReview() {
-    els.safeReviewList.replaceChildren(); els.safeAck.checked = false;
+    els.safeReviewList.replaceChildren(); els.safeUnanalysedWrap.replaceChildren(); els.safeAck.checked = false;
     const messages = state.parsed.messages;
+    const messageIndexById = new Map(messages.map((m, i) => [m.id, i]));
     for (const [id, findings] of state.safe.findings) {
       const m = messages.find(x => x.id === id); if (!m) continue;
-      const index = messages.indexOf(m), item = document.createElement('article'); item.className = 'review-item';
+      const index = messageIndexById.get(id), item = document.createElement('article'); item.className = 'review-item';
       const label = document.createElement('label'); label.className = 'review-choice';
       const check = document.createElement('input'); check.type = 'checkbox'; check.name = 'safe-remove'; check.value = id; check.checked = state.safe.status === 'applied' ? state.safe.excludedIds.has(id) : true;
       const summary = document.createElement('span'); summary.textContent = `Remove · ${fmtDateTime(m.date, m.hasSeconds)} · ${m.sender || 'System'}`; label.append(check, summary); item.appendChild(label);
@@ -271,7 +272,11 @@
     }
     if (!state.safe.findings.size) { const p = document.createElement('p'); p.textContent = 'No messages were flagged. Apply to confirm this scan.'; els.safeReviewList.appendChild(p); }
     els.safeUnanalysedWrap.hidden = !state.safe.unanalysed.length;
-    if (state.safe.unanalysed.length) els.safeUnanalysedWrap.append(` (${state.safe.unanalysed.join(', ')})`);
+    if (state.safe.unanalysed.length) {
+      const check = els.safeUnanalysedWrap.querySelector('input');
+      els.safeUnanalysedWrap.appendChild(document.createTextNode(` (${state.safe.unanalysed.join(', ')})`));
+      if (check) els.safeUnanalysedWrap.insertBefore(check, els.safeUnanalysedWrap.firstChild);
+    }
     els.safeApply.disabled = !!state.safe.unanalysed.length;
     els.safeReview.showModal();
   }

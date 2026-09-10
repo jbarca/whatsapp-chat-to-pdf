@@ -208,7 +208,7 @@ async function analyse(data, token) {
 
 onmessage = ({ data }) => {
   if (data.type === 'cancel') {
-    if (activeRun && (!data.runId || data.runId === activeRun.runId)) { activeRun.cancelled = true; if (activeRun.imageReject) activeRun.imageReject(new Error('Cancelled')); }
+    if (activeRun && (!data.runId || data.runId === activeRun.runId)) { activeRun.cancelled = true; if (activeRun.imageReject) activeRun.imageReject(new Error('Cancelled')); activeRun.imageResolve = activeRun.imageReject = null; }
     if (pendingRun && data.runId === pendingRun.runId) pendingRun = null;
     return;
   }
