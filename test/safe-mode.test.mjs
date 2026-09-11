@@ -48,19 +48,22 @@ try {
   assert.equal(await page.locator('#export').isDisabled(), true);
   await page.locator('[name="safe-category"]').first().uncheck();
   await page.locator('#safe-analyse').click(); await page.locator('#safe-review').waitFor({ state: 'visible' });
-  assert.deepEqual(await page.evaluate(() => ({ created: fakeWorkerStats.created, terminated: fakeWorkerStats.terminated, runs: fakeWorkerStats.runs })), { created: 1, terminated: 0, runs: [1, 2] });
+  const stats = () => page.evaluate(() => ({ created: fakeWorkerStats.created, terminated: fakeWorkerStats.terminated, runs: fakeWorkerStats.runs }));
+  assert.deepEqual(await stats(), { created: 1, terminated: 0, runs: [1, 2] });
   await page.locator('#safe-review').evaluate(dialog => dialog.close());
   await page.locator('#opt-safe').uncheck();
-  assert.equal(await page.evaluate(() => window.fakeWorkerStats.terminated), 1);
+  assert.deepEqual(await stats(), { created: 1, terminated: 1, runs: [1, 2] });
   await page.locator('#opt-safe').check();
   await page.evaluate(() => { window.fakeWorkerStats.failNext = true; });
   await page.locator('#safe-analyse').click(); await page.locator('#safe-status').getByText('Retry', { exact: true }).waitFor();
-  assert.equal(await page.evaluate(() => window.fakeWorkerStats.terminated), 2);
+  /* A failed run and a cancelled run both keep the worker so the loaded models survive; only turning
+     Safe mode off or resetting terminates it. Pin created too, so reuse cannot regress into recreation. */
+  assert.deepEqual(await stats(), { created: 2, terminated: 1, runs: [1, 2, 3] });
   await page.locator('#safe-status').getByText('Retry', { exact: true }).click(); await page.locator('#safe-review').waitFor({ state: 'visible' });
   await page.locator('#safe-review').evaluate(dialog => dialog.close());
   await page.locator('[name="safe-category"]').last().uncheck(); await page.locator('#safe-analyse').click(); await page.locator('#safe-cancel').click();
   assert.match(await page.locator('#safe-status').textContent(), /cancelled/i);
-  assert.equal(await page.evaluate(() => window.fakeWorkerStats.terminated), 3);
+  assert.deepEqual(await stats(), { created: 2, terminated: 1, runs: [1, 2, 3, 4, 5] });
 
   const context = await browser.newContext();
   await context.addInitScript(() => localStorage.setItem('wa2pdf.license', JSON.stringify({ key: 'test', ok: true })));

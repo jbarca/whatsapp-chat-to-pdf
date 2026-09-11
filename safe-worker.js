@@ -9,8 +9,8 @@ const MODELS = Object.freeze({
 });
 let activeRun = null, pendingRun = null, transformersPromise = null, rememberedWasm = false;
 let pipelines = { device: null, toxicity: null, text: null, image: null, textSupportsHandBatch: false, RawImage: null };
-let scoreCache = new Map(), cacheEpoch = '', cacheSize = 0;
-const MAX_CACHE_ENTRIES = 200000;
+let scoreCache = new Map(), cacheEpoch = '';
+const MAX_CACHE_ENTRIES = 200000, DTYPE = 'q8';
 const nativeFetch = self.fetch.bind(self);
 const allowedModelPrefixes = Object.values(MODELS).map(model => `https://huggingface.co/${model.id}/resolve/${model.revision}/`);
 self.fetch = function guardedFetch(input, init) {
@@ -26,7 +26,10 @@ self.fetch = function guardedFetch(input, init) {
 
 function emit(type, runId, data) { postMessage(Object.assign({ type, runId }, data)); }
 function progress(token, phase, completed, total, message, detail) { emit('progress', token.runId, { phase, completed, total, message, detail: detail || null }); }
-function check(token) { if (token.cancelled || activeRun !== token) throw new Error('Cancelled'); }
+function textProgress(token, done, total) { progress(token, 'text', done, total, `Screening text ${done} of ${total}…`); }
+function cancellation() { const error = new Error('Cancelled'); error.cancelled = true; return error; }
+function isCancellation(error) { return !!(error && error.cancelled); }
+function check(token) { if (token.cancelled || activeRun !== token) throw cancellation(); }
 function isEnglish(text, key) {
   const normalized = ` ${key != null ? key : SafePolicy.normalize(text)} `;
   if (/\b(hola|gracias|por favor|bonjour|merci|salut|avec|und|danke|bitte|hallo|ciao|grazie|buongiorno|ola|obrigado|voce|namaste|terima kasih)\b/.test(normalized)) return false;
@@ -81,7 +84,7 @@ async function ensurePipelines(categories, imageEnabled, token) {
     for (const key of ['toxicity', 'text', 'image']) if (need[key]) {
       check(token);
       if (!pipelines[key]) pipelines[key] = await t.pipeline(MODELS[key].task, MODELS[key].id, {
-        revision: MODELS[key].revision, dtype: 'q8', device,
+        revision: MODELS[key].revision, dtype: DTYPE, device,
         progress_callback: p => { check(token); if (p.status === 'progress') progress(token, 'initialization', complete, total, `Downloading models… ${Math.round(p.progress || 0)}%`, p); },
       });
       if (key === 'text' && typeof pipelines[key].entailment_id === 'number' && typeof pipelines[key].contradiction_id === 'number') {
@@ -109,28 +112,20 @@ function getCacheKey(model, text, label) {
   return `${model}:${text}:${label || ''}`;
 }
 function getCachedScore(model, text, label) {
-  if (!text || cacheEpoch !== getCacheEpoch()) return null;
+  if (!text || cacheEpoch !== getCacheEpoch()) return undefined;
   const key = getCacheKey(model, text, label);
-  return scoreCache.get(key);
+  return scoreCache.has(key) ? scoreCache.get(key) : undefined;
 }
 function setCachedScore(model, text, label, score) {
-  if (!text || !scoreCache) return;
-  const cacheEpochNow = getCacheEpoch();
-  if (cacheEpoch !== cacheEpochNow) {
-    scoreCache.clear(); cacheSize = 0; cacheEpoch = cacheEpochNow;
-  }
+  if (!text) return;
+  const epoch = getCacheEpoch();
+  if (cacheEpoch !== epoch) { scoreCache.clear(); cacheEpoch = epoch; }
   const key = getCacheKey(model, text, label);
-  if (!scoreCache.has(key)) {
-    if (cacheSize >= MAX_CACHE_ENTRIES) {
-      const firstKey = scoreCache.keys().next().value;
-      scoreCache.delete(firstKey); cacheSize--;
-    }
-    cacheSize++;
-  }
+  if (!scoreCache.has(key) && scoreCache.size >= MAX_CACHE_ENTRIES) scoreCache.delete(scoreCache.keys().next().value);
   scoreCache.set(key, score);
 }
 function getCacheEpoch() {
-  return `${SafePolicy.VERSION}:${pipelines.device || 'none'}`;
+  return `${SafePolicy.VERSION}:${MODELS.toxicity.revision}:${MODELS.text.revision}:${DTYPE}:${pipelines.device || 'none'}`;
 }
 
 async function analyse(data, token) {
@@ -146,13 +141,19 @@ async function analyse(data, token) {
   const pipes = loaded.pipes; timings.initialization = loaded.duration; check(token);
   const textStarted = performance.now(), batchSize = pipes.device === 'webgpu' ? 32 : 16;
   const labels = categories.filter(x => x !== 'images').map(x => SafePolicy.LABELS[x]);
+  const englishOnly = categories.filter(x => x !== 'images' && x !== 'abuse');
   const scannableGroups = groups.filter(group => group.scannable);
   if (pipes.toxicity) {
-    const toxBucket = SafeScheduler.bucketed(scannableGroups, g => g.text.length);
-    const results = await SafeScheduler.batched(toxBucket.items, batchSize, async batch => {
-      check(token); return arrayResult(await pipes.toxicity(batch.map(x => x.text), { top_k: null }), batch.length);
-    }, done => progress(token, 'text', done, scannableGroups.length, `Screening text ${done} of ${scannableGroups.length}…`));
-    findings.push(...SafeScheduler.fanOut(scannableGroups, toxBucket.restore(results), result => (result || []).flatMap(item => {
+    const cached = scannableGroups.map(group => getCachedScore('toxicity', group.key, ''));
+    const pending = cached.flatMap((score, index) => score === undefined ? [index] : []), hits = scannableGroups.length - pending.length;
+    if (pending.length) {
+      const toxBucket = SafeScheduler.bucketed(pending, index => scannableGroups[index].text.length);
+      const fresh = toxBucket.restore(await SafeScheduler.batched(toxBucket.items, batchSize, async batch => {
+        check(token); return arrayResult(await pipes.toxicity(batch.map(index => scannableGroups[index].text), { top_k: null }), batch.length);
+      }, done => textProgress(token, hits + done, scannableGroups.length), isCancellation));
+      pending.forEach((index, slot) => { cached[index] = fresh[slot]; setCachedScore('toxicity', scannableGroups[index].key, '', fresh[slot]); });
+    }
+    findings.push(...SafeScheduler.fanOut(scannableGroups, cached, result => (result || []).flatMap(item => {
       const category = categoryForLabel(item.label);
       return category === 'abuse' && item.score >= SafePolicy.THRESHOLDS.text ? [{ category, reason: `Multilingual toxicity model: ${item.label}`, score: item.score, source: 'model', _phase: 1 }] : [];
     })));
@@ -160,16 +161,38 @@ async function analyse(data, token) {
   const englishGroups = scannableGroups.filter(group => group.english);
   if (pipes.text && labels.length) {
     let results;
+    const cached = englishGroups.map(group => labels.map(label => getCachedScore('text', group.key, label)));
     if (pipes.textSupportsHandBatch) {
       const pairs = [];
-      for (const group of englishGroups) for (const label of labels) pairs.push({ premise: group.text, hypothesis: HYPOTHESIS(label) });
-      const scores = await mnliScores(pipes.text, pairs, 128); check(token);
-      results = [];
-      for (let g = 0; g < englishGroups.length; g++) results.push({ labels: labels.slice(), scores: scores.slice(g * labels.length, (g + 1) * labels.length) });
+      for (let g = 0; g < englishGroups.length; g++) for (let l = 0; l < labels.length; l++) {
+        if (cached[g][l] === undefined) pairs.push({ premise: englishGroups[g].text, hypothesis: HYPOTHESIS(labels[l]), group: g, label: l });
+      }
+      if (pairs.length) {
+        const hitPairs = englishGroups.length * labels.length - pairs.length;
+        const pairBucket = SafeScheduler.bucketed(pairs, pair => pair.premise.length);
+        const scores = pairBucket.restore(await SafeScheduler.batched(pairBucket.items, batchSize, async batch => {
+          check(token); return mnliScores(pipes.text, batch, 128);
+        }, done => textProgress(token, Math.floor((hitPairs + done) / labels.length), englishGroups.length), isCancellation));
+        pairs.forEach((pair, slot) => { cached[pair.group][pair.label] = scores[slot]; setCachedScore('text', englishGroups[pair.group].key, labels[pair.label], scores[slot]); });
+      }
+      results = cached.map(scores => ({ labels: labels.slice(), scores }));
     } else {
-      results = await SafeScheduler.batched(englishGroups, batchSize, async batch => {
-        check(token); return objectResult(await pipes.text(batch.map(x => x.text), labels, { multi_label: true }), batch.length);
-      }, done => progress(token, 'text', done, englishGroups.length, `Screening text ${done} of ${englishGroups.length}…`));
+      const pending = [];
+      results = cached.map((scores, index) => {
+        if (scores.some(score => score === undefined)) { pending.push(index); return null; }
+        const order = labels.map((_, l) => l).sort((a, b) => (scores[b] - scores[a]) || (a - b));
+        return { labels: order.map(l => labels[l]), scores: order.map(l => scores[l]) };
+      });
+      const hits = englishGroups.length - pending.length;
+      if (pending.length) {
+        const fresh = await SafeScheduler.batched(pending, batchSize, async batch => {
+          check(token); return objectResult(await pipes.text(batch.map(index => englishGroups[index].text), labels, { multi_label: true }), batch.length);
+        }, done => textProgress(token, hits + done, englishGroups.length), isCancellation);
+        pending.forEach((index, slot) => {
+          results[index] = fresh[slot];
+          (fresh[slot].labels || []).forEach((label, l) => setCachedScore('text', englishGroups[index].key, label, fresh[slot].scores[l]));
+        });
+      }
     }
     findings.push(...SafeScheduler.fanOut(englishGroups, results, result => (result.labels || []).flatMap((label, index) => {
       const category = categoryForLabel(label);
@@ -191,8 +214,10 @@ async function analyse(data, token) {
     }
     if (decoded.length) {
       const results = await SafeScheduler.batched(decoded, imageBatchSize, async batch => {
-        check(token); return arrayResult(await pipes.image(batch.map(x => x.raw), ['safe image', 'nudity or sexual content', 'graphic violence', 'drugs or weapons']), batch.length);
-      });
+        check(token);
+        try { return arrayResult(await pipes.image(batch.map(x => x.raw), ['safe image', 'nudity or sexual content', 'graphic violence', 'drugs or weapons']), batch.length); }
+        catch (error) { if (batch.length > 1 || isCancellation(error)) throw error; unanalysed.push(batch[0].name); return [null]; }
+      }, null, isCancellation);
       decoded.forEach((item, index) => {
         for (const result of results[index] || []) if (result.label !== 'safe image' && result.score >= SafePolicy.THRESHOLDS.image) {
           for (const owner of attachmentOwners.get(item.name) || []) findings.push({ messageId: owner.id, category: 'images', reason: `Image model: ${result.label}`, score: result.score, source: 'model', attachment: item.name, _messageIndex: owner.index, _phase: 3 });
@@ -202,13 +227,13 @@ async function analyse(data, token) {
     offset += names.length; progress(token, 'image', offset, imageNames.length, `Screening images ${offset} of ${imageNames.length}…`);
   }
   timings.image = elapsed(imageStarted); timings.total = elapsed(totalStarted); check(token);
-  const partialCoverage = labels.length ? scannableGroups.some(group => !group.english) : false;
+  const partialCoverage = englishOnly.length ? scannableGroups.some(group => !group.english) : false;
   emit('complete', token.runId, { findings: SafePolicy.mergeFindings(SafeScheduler.ordered(findings)), unanalysed, partialCoverage, device: pipes.device, policyVersion: SafePolicy.VERSION, timings });
 }
 
 onmessage = ({ data }) => {
   if (data.type === 'cancel') {
-    if (activeRun && (!data.runId || data.runId === activeRun.runId)) { activeRun.cancelled = true; if (activeRun.imageReject) activeRun.imageReject(new Error('Cancelled')); activeRun.imageResolve = activeRun.imageReject = null; }
+    if (activeRun && (!data.runId || data.runId === activeRun.runId)) { activeRun.cancelled = true; if (activeRun.imageReject) activeRun.imageReject(cancellation()); activeRun.imageResolve = activeRun.imageReject = null; }
     if (pendingRun && data.runId === pendingRun.runId) pendingRun = null;
     return;
   }
@@ -220,12 +245,12 @@ onmessage = ({ data }) => {
   if (!activeRun) {
     const token = { runId: data.runId, cancelled: false }; activeRun = token;
     analyse(data, token).catch(error => { if (!token.cancelled) emit('error', token.runId, { message: error.message || String(error), fatal: true }); }).finally(() => {
-      emit('cancelled', token.runId, {});
+      if (token.cancelled) emit('cancelled', token.runId, {});
       if (activeRun === token) activeRun = null;
       if (pendingRun) { const next = pendingRun; pendingRun = null; self.postMessage(next); }
     });
   } else {
-    activeRun.cancelled = true; pendingRun = data; if (activeRun.imageReject) activeRun.imageReject(new Error('Cancelled'));
+    activeRun.cancelled = true; pendingRun = data; if (activeRun.imageReject) activeRun.imageReject(cancellation());
   }
 };
 emit('ready', null, { policyVersion: SafePolicy.VERSION, models: MODELS });

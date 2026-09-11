@@ -26,6 +26,19 @@ const normalize = text => String(text || '').toLowerCase().trim();
   assert.deepEqual(calls, [[1, 2, 3, 4], [1, 2], [3, 4, 5], [3], [4, 5]]);
   await assert.rejects(() => scheduler.batched([1], 8, async () => { throw new Error('persistent'); }), /persistent/);
 
+  const fatalCalls = [];
+  await assert.rejects(() => scheduler.batched([1, 2, 3, 4], 4, async batch => {
+    fatalCalls.push(batch.length); const error = new Error('Cancelled'); error.cancelled = true; throw error;
+  }, null, error => !!error.cancelled), /Cancelled/);
+  assert.deepEqual(fatalCalls, [4]);
+  const softCalls = [];
+  assert.deepEqual(await scheduler.batched([1, 2, 3, 4], 4, async batch => {
+    softCalls.push(batch.length);
+    if (batch.length > 2) throw new Error('mock batch limit');
+    return batch.map(x => x * 10);
+  }, null, error => !!error.cancelled), [10, 20, 30, 40]);
+  assert.deepEqual(softCalls, [4, 2, 2]);
+
   const fanned = scheduler.fanOut(prepared.groups, [['hit'], []], result => result.map(reason => ({ category: 'abuse', reason, _phase: 1 })));
   assert.deepEqual(scheduler.ordered(fanned).map(x => x.messageId), [3, 1]);
   const reordered = scheduler.ordered([
