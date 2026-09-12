@@ -22,6 +22,10 @@ const files = new Map([
   ['/pdf-worker.js', ['pdf-worker.js', 'text/javascript']],
   ['/vendor/jspdf-4.2.1.umd.min.js', ['vendor/jspdf-4.2.1.umd.min.js', 'text/javascript']],
   ['/vendor/NotoSans-Regular.ttf', ['vendor/NotoSans-Regular.ttf', 'font/ttf']],
+  // coi-serviceworker is inert under Playwright (index.html's shouldRegister() checks
+  // navigator.webdriver and never registers it there), but the browser still requests
+  // it, so it must be servable or the harness records a 404 console error.
+  ['/coi-serviceworker-0.1.7.js', ['coi-serviceworker-0.1.7.js', 'text/javascript']],
 ]);
 const server = createServer(async (req, res) => {
   const entry = files.get(req.url.split('?')[0]);
@@ -76,7 +80,22 @@ async function save(page, name, selector = '#export') {
   await pdf.destroy();
   console.log(name, JSON.stringify({ ...result, text: undefined })); return result;
 }
-const ids = text => Array.from(text.matchAll(/MESSAGE_(\d{6})/g), m => Number(m[1]));
+// Chrome/Edge's PDF text layer can split a literal run into several text items at
+// arbitrary character boundaries (e.g. "MESSAGE"/"_000013", "12"/":"/"20", even
+// "LONG"/"_"/"LINE"/"_0001"), and save() joins items with '\n', which then lands
+// inside the split literal. flexChars() builds a pattern matching `literal` with
+// optional whitespace tolerated between every character, so an assertion still
+// requires every real character of the literal to be present and in order, and
+// can only match at the literal's own location — it just can't be defeated by
+// whitespace this file's own join() inserted. flexRe() wraps that as a RegExp;
+// marker id-extractors append their own capture group afterwards.
+function flexChars(literal) {
+  return literal.split('').map(ch => ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*');
+}
+function flexRe(literal, flags = 'g') {
+  return new RegExp(flexChars(literal), flags);
+}
+const ids = text => Array.from(text.matchAll(new RegExp(flexChars('MESSAGE_') + '(\\d{6})', 'g')), m => Number(m[1]));
 try {
   const chat = Array.from({ length: count }, (_, i) => `[${i < 500 ? '14' : '15'}/08/2026, 12:00:07] ${i % 2 ? 'Bob' : 'Alice'}: MESSAGE_${String(i + 1).padStart(6, '0')} ${i % 100 === 0 ? 'MATCH ' : ''}Hello from this exported chat.${i % 7 === 0 ? '\nA second line with https://example.com/.' : ''}`).join('\n');
   const page = await open(); await load(page, chat);
@@ -88,7 +107,7 @@ try {
   });
   const large = await save(page, 'large');
   assert.deepEqual(ids(large.text), Array.from({ length: count }, (_, i) => i + 1));
-  assert.ok(!large.text.includes('PREVIEW'));
+  assert.ok(!flexRe('PREVIEW').test(large.text));
   assert.ok(large.links.includes('https://example.com/'));
   assert.ok(await page.evaluate(() => window.__ticks > 5));
   assert.ok(await page.evaluate(() => window.__progress.some(s => s.includes('250 of'))));
@@ -131,16 +150,16 @@ try {
   const expected = Array.from({ length: count }, (_, i) => i + 1).filter(id => id > 500 && (id - 1) % 100 === 0);
   assert.deepEqual(ids(evidence.text), expected);
   assert.ok(evidence.text.includes(createHash('sha256').update(chat).digest('hex')));
-  assert.ok(evidence.text.includes('#501')); assert.ok(evidence.text.includes('2026-08-15 12:00:07'));
+  assert.ok(flexRe('#501').test(evidence.text)); assert.ok(flexRe('2026-08-15 12:00:07').test(evidence.text));
   assert.deepEqual(evidence.size, [0, 0, 612, 792]);
   await page.locator('#opt-search').fill('no-such-message');
   const empty = await save(page, 'empty'); assert.deepEqual(ids(empty.text), []);
-  assert.ok(empty.text.includes('No messages match'));
+  assert.ok(flexRe('No messages match').test(empty.text));
   await page.close();
 
   const free = await open(false); await load(free, chat);
   const limited = await save(free, 'free'); assert.deepEqual(ids(limited.text), Array.from({ length: 100 }, (_, i) => i + 1));
-  assert.ok(limited.text.includes('PREVIEW')); assert.ok(limited.text.includes((count - 100).toLocaleString() + ' more messages'));
+  assert.ok(flexRe('PREVIEW').test(limited.text)); assert.ok(flexRe((count - 100).toLocaleString() + ' more messages').test(limited.text));
   assert.equal(await free.locator('#opt-media').isDisabled(), true); await free.close();
 
   const media = await open();
@@ -155,15 +174,15 @@ try {
   zip.file('photo.png', image, { base64: true }); zip.file('broken.jpg', 'corrupt');
   await media.locator('#file').setInputFiles({ name: 'Photos.zip', mimeType: 'application/zip', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
   await media.locator('#app').waitFor({ state: 'visible' }); await media.locator('#opt-media').check();
-  const photos = await save(media, 'photos'); assert.ok(photos.text.includes('broken.jpg (image unavailable)'));
+  const photos = await save(media, 'photos'); assert.ok(flexRe('broken.jpg (image unavailable)').test(photos.text));
   assert.match(await media.locator('#export-status').textContent(), /1 photo/); await media.close();
 
   const long = await open();
   const longLines = Array.from({ length: 700 }, (_, i) => `LONG_LINE_${String(i + 1).padStart(4, '0')} A long multiline message.`);
   await load(long, '[14/08/2026, 12:00:01] Alice: ' + longLines.join('\n') + '\n[14/08/2026, 12:00:02] Bob: café Ελληνικά Привет مرحبا 你好 😊\n[14/08/2026, 12:00:03] Alice: ' + 'W'.repeat(6000));
   const split = await save(long, 'long-unicode');
-  assert.deepEqual(Array.from(split.text.matchAll(/LONG_LINE_(\d{4})/g), m => Number(m[1])), Array.from({ length: 700 }, (_, i) => i + 1));
-  for (const word of ['café', 'Ελληνικά', 'Привет', '你好', '😊']) assert.ok(split.text.includes(word), word + ' must remain extractable');
+  assert.deepEqual(Array.from(split.text.matchAll(new RegExp(flexChars('LONG_LINE_') + '(\\d{4})', 'g')), m => Number(m[1])), Array.from({ length: 700 }, (_, i) => i + 1));
+  for (const word of ['café', 'Ελληνικά', 'Привет', '你好', '😊']) assert.ok(flexRe(word).test(split.text), word + ' must remain extractable');
   assert.equal((split.text.match(/W/g) || []).length - (split.text.match(/WhatsApp/g) || []).length, 6000);
   await long.close();
 
@@ -174,7 +193,7 @@ try {
   await failure.waitForFunction(() => document.getElementById('export-status').textContent.includes('Synthetic initialization failure'));
   assert.equal(await failure.locator('#export').isEnabled(), true); assert.equal(await failure.locator('#cancel-export').isVisible(), false);
   await failure.unroute('**/pdf-worker.js');
-  const retried = await save(failure, 'retried'); assert.ok(retried.text.includes('RETRY_OK'));
+  const retried = await save(failure, 'retried'); assert.ok(flexRe('RETRY_OK').test(retried.text));
   // A changed option invalidates the previously prepared download.
   await failure.locator('#opt-title').fill('Changed title');
   await failure.locator('#download-pdf').waitFor({ state: 'hidden' });

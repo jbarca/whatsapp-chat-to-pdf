@@ -19,7 +19,10 @@ const count = Number(process.env.PDF_TEST_MESSAGES || 1000);
 assert.ok(Number.isInteger(count) && count >= 1000);
 const server = createServer(async (req, res) => {
   const path = req.url.split('?')[0];
-  const types = { '/': 'text/html', '/app.js': 'text/javascript', '/parser.js': 'text/javascript', '/safe-policy.js': 'text/javascript', '/styles.css': 'text/css' };
+  // coi-serviceworker is inert under Playwright (index.html's shouldRegister() checks
+  // navigator.webdriver and never registers it there), but the browser still requests
+  // it, so it must be servable or the harness records a 404 console error.
+  const types = { '/': 'text/html', '/app.js': 'text/javascript', '/parser.js': 'text/javascript', '/safe-policy.js': 'text/javascript', '/styles.css': 'text/css', '/coi-serviceworker-0.1.7.js': 'text/javascript' };
   if (!types[path]) { res.writeHead(404); res.end(); return; }
   res.setHeader('Content-Type', types[path]);
   res.end(await readFile(join(root, path === '/' ? 'index.html' : path.slice(1))));
@@ -87,6 +90,23 @@ async function pdfText(page, name) {
   return result;
 }
 
+// Chrome's PDF text layer can split a literal run into several text items at
+// arbitrary character boundaries (observed: "MESSAGE"/"_000013", "12"/":"/"20",
+// even "LONG"/"_"/"LINE"/"_0001"), and pdfText() inserts '\n' between every
+// item/page, which then lands inside the split literal. flexChars() builds a
+// pattern matching `literal` with optional whitespace tolerated between every
+// character, so an assertion still requires every real character of the
+// literal to be present and in order, and can only match at the literal's own
+// location (adjacent, real content can't be skipped) — it just can't be
+// defeated by whitespace this file's own join() inserted. flexRe() wraps that
+// as a plain RegExp; marker regexes append their own capture group afterwards.
+function flexChars(literal) {
+  return literal.split('').map(ch => ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*');
+}
+function flexRe(literal, flags = 'g') {
+  return new RegExp(flexChars(literal), flags);
+}
+
 try {
   const chat = Array.from({ length: count }, (_, i) => {
     const day = i < 500 ? '14' : '15';
@@ -112,9 +132,13 @@ try {
   await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
   await page.screenshot({ path: join(output, 'desktop.png') });
   const large = await pdfText(page, 'large');
-  const ids = Array.from(large.text.matchAll(/MESSAGE_(\d{6})/g), m => Number(m[1]));
+  // Chrome's PDF text layer can split the "MESSAGE_NNNNNN" marker into separate
+  // text items (e.g. "MESSAGE" and "_000013"), and pdfText() joins items with '\n'.
+  // Tolerate whitespace Chrome/pdfjs may insert between "MESSAGE" and "_", without
+  // loosening the digit run itself, so this cannot fuse unrelated numbers together.
+  const ids = Array.from(large.text.matchAll(new RegExp(flexChars('MESSAGE_') + '(\\d{6})', 'g')), m => Number(m[1]));
   assert.deepEqual(ids, Array.from({ length: count }, (_, i) => i + 1), 'Every message must appear exactly once, in order');
-  assert.ok(!large.text.includes('PREVIEW'));
+  assert.ok(!flexRe('PREVIEW').test(large.text));
   assert.equal(await page.locator('#print-doc').count(), 0);
   assert.equal(await page.locator('#doc .msg').count(), 500);
   await page.locator('#load-more').dispatchEvent('click');
@@ -165,10 +189,14 @@ try {
   assert.equal(await page.locator('#print-doc .msg').count(), expected.length);
   assert.equal(await page.locator('#print-doc .sender').count(), expected.length);
   const evidence = await pdfText(page, 'evidence');
-  assert.deepEqual(Array.from(evidence.text.matchAll(/MESSAGE_(\d{6})/g), m => Number(m[1])), expected);
+  assert.deepEqual(Array.from(evidence.text.matchAll(new RegExp(flexChars('MESSAGE_') + '(\\d{6})', 'g')), m => Number(m[1])), expected);
   assert.ok(evidence.text.includes(createHash('sha256').update(chat).digest('hex')));
-  assert.ok(evidence.text.includes('2026-08-15 12:20:07'));
-  assert.equal([...evidence.text.matchAll(/exported/g)].length, evidence.pages + expected.length);
+  // Same Chrome text-layer splitting as the marker above also breaks up the
+  // date/time run (e.g. "12", ":", "20", ":", "07" as separate items each
+  // padded by inserted '\n's) — flexRe tolerates that without weakening which
+  // literal characters, and their order, must actually be present.
+  assert.match(evidence.text, flexRe('2026-08-15 12:20:07'));
+  assert.equal([...evidence.text.matchAll(flexRe('exported'))].length, evidence.pages + expected.length);
   assert.equal(evidence.size[2], 612);
   assert.equal(evidence.size[3], 792);
 
@@ -196,9 +224,9 @@ try {
   await exportChat(free);
   assert.equal(await free.locator('#print-doc .msg').count(), 100);
   const preview = await pdfText(free, 'free');
-  assert.equal([...preview.text.matchAll(/MESSAGE_\d{6}/g)].length, 100);
-  assert.ok(preview.text.includes('PREVIEW'));
-  assert.ok(preview.text.includes((count - 100).toLocaleString() + ' more messages'));
+  assert.equal([...preview.text.matchAll(new RegExp(flexChars('MESSAGE_') + '\\d{6}', 'g'))].length, 100);
+  assert.ok(flexRe('PREVIEW').test(preview.text));
+  assert.ok(flexRe((count - 100).toLocaleString() + ' more messages').test(preview.text));
   assert.equal(await free.locator('#opt-media').isDisabled(), true);
   await free.close();
 
@@ -223,7 +251,7 @@ try {
   assert.ok(photos.every(p => p.width > 0 && p.width <= 1800 && p.height <= 1260));
   assert.match(await media.locator('#export-status').textContent(), /1 photo is unavailable/);
   const photoPdf = await pdfText(media, 'photos');
-  assert.ok(photoPdf.text.includes('broken.jpg (image unavailable)'));
+  assert.ok(flexRe('broken.jpg (image unavailable)').test(photoPdf.text));
   assert.ok(await media.evaluate(async src => { try { await fetch(src); return false; } catch { return true; } }, photos[0].src));
   await media.close();
 
@@ -233,8 +261,8 @@ try {
   await load(long, '[14/08/2026, 12:00:01] Alice: ' + lines.join('\n') + '\n[14/08/2026, 12:00:02] Bob: café Ελληνικά Привет مرحبا 你好 😊');
   await exportChat(long);
   const longPdf = await pdfText(long, 'long-message');
-  assert.deepEqual(Array.from(longPdf.text.matchAll(/LONG_LINE_(\d{4})/g), m => Number(m[1])), Array.from({ length: 700 }, (_, i) => i + 1));
-  assert.ok(longPdf.text.includes('café'));
+  assert.deepEqual(Array.from(longPdf.text.matchAll(new RegExp(flexChars('LONG_LINE_') + '(\\d{4})', 'g')), m => Number(m[1])), Array.from({ length: 700 }, (_, i) => i + 1));
+  assert.ok(flexRe('café').test(longPdf.text));
   await long.close();
   assert.deepEqual(errors, []);
   // Fetching the revoked blob above intentionally generates one network error.

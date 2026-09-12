@@ -53,5 +53,11 @@ const normalize = text => String(text || '').toLowerCase().trim();
   assert.deepEqual(bucket.items, ['a', 'a', 'bb', 'ccc', 'dddd']);
   assert.deepEqual(bucket.restore(bucket.items.map(s => s.toUpperCase())), items.map(s => s.toUpperCase()));
   await assert.rejects(() => scheduler.batched([1], 1, async () => [10, 20]), /batched: invoke returned/);
+
+  // Stable tiebreak: equal-size items must preserve their original relative order.
+  const tagged = ['bb-1', 'a-1', 'bb-0', 'ccc-0', 'bb-2', 'a-0'];
+  const bucketTagged = scheduler.bucketed(tagged, s => s.split('-')[0].length);
+  assert.deepEqual(bucketTagged.items, ['a-1', 'a-0', 'bb-1', 'bb-0', 'bb-2', 'ccc-0']);
+  assert.deepEqual(bucketTagged.restore(bucketTagged.items.map(s => s.toUpperCase())), tagged.map(s => s.toUpperCase()));
   console.log('safe scheduler tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
