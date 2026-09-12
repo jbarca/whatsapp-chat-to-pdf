@@ -1,6 +1,6 @@
 /* Cancellable, entirely local Safe Mode inference worker. */
 'use strict';
-importScripts('safe-policy.js', 'safe-scheduler.js');
+importScripts('safe-policy.js?v=1.1.0', 'safe-scheduler.js?v=1.1.0');
 
 const MODELS = Object.freeze({
   toxicity: { task: 'text-classification', id: 'onnx-community/distilbert-multilingual-toxicity-classifier-ONNX', revision: '4fbaccee8caaba02641b1757f7ef697e3fbffdb8' },

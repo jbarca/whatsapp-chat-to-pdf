@@ -19,6 +19,18 @@ Pro unlock = Gumroad license key verified client-side (`api.gumroad.com/v2/licen
 - Headless smoke test: Chrome at `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` with `--headless=new --virtual-time-budget=8000 --dump-dom|--print-to-pdf=|--screenshot=`. Pro path: temporary harness page that seeds `localStorage['wa2pdf.license']={key,ok:true}` (see session 2026-09-07; harness is not committed).
 - Verified 2026-09-07: free = 100 msgs + watermark (8-page PDF for sample); Pro evidence mode = all 351 numbered + SHA-256 cover (40 pages).
 
+## Safe mode asset caching (2026-09-12)
+- `safe-worker.js` (`importScripts`), `index.html`'s `<script src="safe-policy.js">`, and
+  `app.js`'s `new Worker(...)` all carry a manual `?v=1.1.0` cache-buster matching
+  `SafePolicy.VERSION` in `safe-policy.js`. Bump all three literals together whenever
+  `safe-policy.js`/`safe-scheduler.js` changes — Chrome caches Worker scripts and their
+  `importScripts` far more aggressively than normal page assets, so without this a client
+  can end up running a new `safe-worker.js` against a stale `safe-policy.js` (symptom seen:
+  "Safe mode failed: isScannable is not a function" even though the checked-out file defines
+  it). Diagnose this class of report first with `node -e "require('./safe-policy.js').isScannable"`
+  (fast: not `~/.nvm/.../node`, that's only needed for the `assert/strict` test files) before
+  assuming the code is broken — if it resolves, the bug is stale browser/worker cache, not source.
+
 ## Gotchas
 - `[hidden]{display:none!important}` is required because `.app{display:grid}` otherwise overrides the attribute.
 - Auto-mode classifier blocks `gh repo create` (publishing); user must run it (commands in MANUAL_STEPS.md).
