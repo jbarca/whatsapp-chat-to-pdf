@@ -213,7 +213,39 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" crossorigin="anonymous"></script>
 <script src="parser.js"></script>
 <script src="safe-policy.js"></script>
-<script src="vendor/coi-serviceworker-0.1.7.js"></script>
+<script>
+/* COOP/COEP arrive from a service worker because GitHub Pages cannot send headers, and
+   without them crossOriginIsolated is false and safe-worker.js pins ONNX to one thread.
+   The script sits at the site root, not vendor/, because a worker's scope cannot exceed
+   its own directory without a Service-Worker-Allowed header a static host cannot send.
+   require-corp, never credentialless: Safari does not implement credentialless, and every
+   cross-origin subresource here is already CORS-mode (JSZip is crossorigin="anonymous",
+   Gumroad and Hugging Face are CORS fetches), so require-corp blocks nothing. */
+window.coi = (function () {
+  var KEY = 'wa2pdf-coi-sw-registered', ss = null;
+  try { ss = window.sessionStorage; } catch (e) {}  // unavailable in some privacy modes
+  var reloaded = !!(ss && ss.getItem(KEY));
+  return {
+    coepCredentialless: function () { return false; },
+    // At most one reload per tab, so a browser or host that refuses isolation degrades to
+    // the single-threaded path instead of reload-looping. navigator.webdriver and the
+    // sample/test query keep the worker out of the Playwright suites, which serve the
+    // site over plain HTTP and must not have their responses rewritten under them.
+    shouldRegister: function () {
+      return !reloaded && !navigator.webdriver && !/sample=1|test/.test(location.search);
+    },
+    doReload: function () { try { ss && ss.setItem(KEY, '1'); } catch (e) {} location.reload(); }
+  };
+})();
+/* coi-serviceworker only reloads when the worker was already active as the page arrived, so
+   a first-ever visit would otherwise spend its whole session un-isolated — and for a one-off
+   tool that is most visits. Reload as soon as the new worker takes control, but only in the
+   first seconds, so a reload can never throw away a chat the user has already loaded. */
+if (navigator.serviceWorker) navigator.serviceWorker.addEventListener('controllerchange', function () {
+  if (!window.crossOriginIsolated && window.coi.shouldRegister() && performance.now() < 10000) window.coi.doReload();
+});
+</script>
+<script src="coi-serviceworker-0.1.7.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
