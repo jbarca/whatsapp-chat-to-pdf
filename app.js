@@ -228,8 +228,8 @@
       else if (data.type === 'image-batch-request') {
         try {
           const buffers = await Promise.all(data.names.map(async name => { const entry = state.media.get(name); return entry ? entry.async('arraybuffer').catch(() => null) : null; }));
-          if (state.safe.worker === worker && state.safe.activeRunId === runId) worker.postMessage({ type: 'image-batch-response', runId, buffers }, buffers.filter(Boolean));
-        } catch (e) { if (state.safe.worker === worker && state.safe.activeRunId === runId) worker.postMessage({ type: 'image-batch-response', runId, buffers: data.names.map(() => null) }); }
+          if (state.safe.worker === worker && state.safe.activeRunId === runId) worker.postMessage({ type: 'image-batch-response', runId, requestId: data.requestId, buffers }, buffers.filter(Boolean));
+        } catch (e) { if (state.safe.worker === worker && state.safe.activeRunId === runId) worker.postMessage({ type: 'image-batch-response', runId, requestId: data.requestId, buffers: data.names.map(() => null) }); }
       } else if (data.type === 'complete') {
         state.safe.status = 'review'; state.safe.activeRunId = 0; state.safe.fingerprint = fingerprint; state.safe.policyVersion = data.policyVersion;
         state.safe.unanalysed = data.unanalysed || []; state.safe.partialCoverage = !!data.partialCoverage;

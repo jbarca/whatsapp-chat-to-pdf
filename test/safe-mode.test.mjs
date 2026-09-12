@@ -17,12 +17,22 @@ try {
   const page = await browser.newPage();
   await page.addInitScript(() => {
     localStorage.setItem('wa2pdf.license', JSON.stringify({ key: 'test', ok: true }));
-    window.fakeWorkerStats = { created: 0, terminated: 0, runs: [], failNext: false };
+    window.fakeWorkerStats = { created: 0, terminated: 0, runs: [], failNext: false, imageProbe: true, imageResponses: [] };
     class FakeWorker {
       constructor(url) { this.url = url; window.fakeWorkerStats.created++; setTimeout(() => this.onmessage?.({ data: { type: 'ready', policyVersion: '1.0.0' } })); }
       postMessage(data) {
+        /* The worker prefetches image batches, so it keys pending requests by a monotonic requestId
+           and drops a response whose id is not outstanding. Record what the page answers with. */
+        if (data.type === 'image-batch-response') { window.fakeWorkerStats.imageResponses.push({ runId: data.runId, requestId: data.requestId, buffers: (data.buffers || []).length }); return; }
         if (data.type === 'analyse') {
           window.fakeWorkerStats.runs.push(data.runId);
+          if (window.fakeWorkerStats.imageProbe) {
+            window.fakeWorkerStats.imageProbe = false;
+            setTimeout(() => {
+              this.onmessage?.({ data: { type: 'image-batch-request', runId: data.runId, requestId: 1, names: ['a.jpg'] } });
+              this.onmessage?.({ data: { type: 'image-batch-request', runId: data.runId, requestId: 2, names: ['b.jpg', 'c.jpg'] } });
+            });
+          }
           const fail = window.fakeWorkerStats.failNext; window.fakeWorkerStats.failNext = false;
           setTimeout(() => this.onmessage?.({ data: fail
             ? { type: 'error', runId: data.runId, message: 'mock fatal error', fatal: true }
@@ -40,6 +50,11 @@ try {
   assert.equal(await page.locator('#opt-evidence').isChecked(), false);
   assert.equal(await page.locator('#export').isDisabled(), true);
   await page.locator('#safe-analyse').click(); await page.locator('#safe-review').waitFor({ state: 'visible' });
+  /* Every image batch must be answered with its own requestId echoed back, one response per
+     request, or the worker's prefetched batches would go unanswered or be answered twice. */
+  await page.waitForFunction(() => window.fakeWorkerStats.imageResponses.length >= 2);
+  assert.deepEqual(await page.evaluate(() => [...window.fakeWorkerStats.imageResponses].sort((a, b) => a.requestId - b.requestId)), [
+    { runId: 1, requestId: 1, buffers: 1 }, { runId: 1, requestId: 2, buffers: 2 }]);
   assert.equal(await page.locator('[name="safe-remove"]:checked').count(), 1);
   await page.locator('#safe-apply').click();
   assert.equal(await page.locator('#doc .msg').count(), 2);

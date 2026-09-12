@@ -8,7 +8,7 @@ const MODELS = Object.freeze({
   image: { task: 'zero-shot-image-classification', id: 'Xenova/clip-vit-base-patch32', revision: 'd15189d7028b43f1d3e65039190477f6af591c2a' },
 });
 let activeRun = null, pendingRun = null, transformersPromise = null, rememberedWasm = false;
-let pipelines = { device: null, toxicity: null, text: null, image: null, textSupportsHandBatch: false, RawImage: null };
+let pipelines = { device: null, toxicity: null, text: null, image: null, textSupportsHandBatch: false, imageProto: null, RawImage: null };
 let scoreCache = new Map(), cacheEpoch = '';
 const MAX_CACHE_ENTRIES = 200000, DTYPE = 'q8';
 const nativeFetch = self.fetch.bind(self);
@@ -70,6 +70,108 @@ async function mnliScores(pipe, pairs, maxLength) {
     return 1 / (1 + Math.exp(c - e));
   });
 }
+/* Cached CLIP text prototypes. The zero-shot image pipeline re-runs the text tower for all four
+   labels on every batch, but the labels are constant, so run it once per session, keep the 4xN
+   `text_embeds`, and do the cosine / logit_scale softmax here. The fused CLIP graph still requires
+   `input_ids` and `attention_mask`, so each batch feeds a throwaway two-token prompt and ignores
+   its text outputs; `calibrateImagePrototypes` proves that the vision tower really is independent
+   of the text inputs, and that the scores it computes match the pipeline's, before the fast path is
+   used. Anything it cannot prove leaves `supported: false` and the plain pipeline call is used
+   instead, exactly as `mnliScores` falls back for MNLI. Everything downstream reads only
+   `labels`/`text`/`width`/`scale`/`dummy`, so the prototypes can later come from a committed
+   constant instead of a calibration pass without touching the scoring code. */
+const IMAGE_LABELS = Object.freeze(['safe image', 'nudity or sexual content', 'graphic violence', 'drugs or weapons']);
+const IMAGE_HYPOTHESIS = label => `This is a photo of ${label}`;
+/* Output names of the fused CLIP graph, verified against the pinned Xenova/clip-vit-base-patch32
+   revision. Named so a rename in a future model or transformers.js release trips the guard below
+   rather than silently reading `undefined`. */
+const IMAGE_OUTPUTS = Object.freeze({ text: 'text_embeds', image: 'image_embeds', logits: 'logits_per_image' });
+const IMAGE_SCORE_TOLERANCE = 1e-3, IMAGE_EMBED_TOLERANCE = 1e-5;
+
+/* Reproduces the vendored bundle's softmax: float32 exponentials, a float64 sum, a float32
+   division. Keeping the arithmetic identical keeps the fast path from drifting from the pipeline. */
+function softmax32(row) {
+  let max = -Infinity;
+  for (let index = 0; index < row.length; index++) if (row[index] > max) max = row[index];
+  const exps = new Float32Array(row.length);
+  let sum = 0;
+  for (let index = 0; index < row.length; index++) { exps[index] = Math.exp(row[index] - max); sum += exps[index]; }
+  const out = new Float32Array(row.length);
+  for (let index = 0; index < row.length; index++) out[index] = exps[index] / sum;
+  return out;
+}
+function isEmbedTensor(tensor, rows, width) {
+  return !!(tensor && tensor.dims && tensor.dims.length === 2 && tensor.dims[0] === rows && tensor.dims[1] > 0
+    && (width === undefined || tensor.dims[1] === width)
+    && tensor.data && tensor.data.length === rows * tensor.dims[1]);
+}
+function normalizedRows(data, rows, width) {
+  const out = new Float32Array(rows * width);
+  for (let row = 0; row < rows; row++) {
+    let sum = 0;
+    for (let column = 0; column < width; column++) { const value = data[row * width + column]; sum += value * value; }
+    const inverse = sum > 0 ? 1 / Math.sqrt(sum) : 0;
+    for (let column = 0; column < width; column++) out[row * width + column] = data[row * width + column] * inverse;
+  }
+  return out;
+}
+function cosine(a, aRow, b, bRow, width) {
+  let sum = 0;
+  for (let column = 0; column < width; column++) sum += a[aRow * width + column] * b[bRow * width + column];
+  return sum;
+}
+function rankImage(embeds, row, proto) {
+  const logits = new Float32Array(proto.labels.length);
+  for (let label = 0; label < proto.labels.length; label++) logits[label] = proto.scale * cosine(embeds, row, proto.text, label, proto.width);
+  const scores = softmax32(logits);
+  return proto.labels.map((label, index) => ({ score: scores[index], label })).sort((a, b) => b.score - a.score);
+}
+async function calibrateImagePrototypes(pipe, RawImage, token) {
+  const unsupported = { labels: IMAGE_LABELS.slice(), text: null, width: 0, scale: 0, dummy: null, supported: false };
+  try {
+    if (typeof pipe !== 'function' || typeof pipe.tokenizer !== 'function' || typeof pipe.processor !== 'function' || typeof pipe.model !== 'function' || typeof RawImage !== 'function') return unsupported;
+    if (!pipe.model.config || pipe.model.config.model_type === 'siglip') return unsupported;
+    const labels = unsupported.labels;
+    const tokenize = texts => pipe.tokenizer(texts, { padding: true, truncation: true });
+    const { pixel_values } = await pipe.processor([new RawImage(new Uint8ClampedArray(3), 1, 1, 3)]); check(token);
+    if (!pixel_values || !pixel_values.dims || pixel_values.dims[0] !== 1) return unsupported;
+    const full = await pipe.model(Object.assign({}, tokenize(labels.map(IMAGE_HYPOTHESIS)), { pixel_values })); check(token);
+    const text = full[IMAGE_OUTPUTS.text], image = full[IMAGE_OUTPUTS.image], logits = full[IMAGE_OUTPUTS.logits];
+    if (!isEmbedTensor(text, labels.length) || !isEmbedTensor(image, 1, text.dims[1]) || !isEmbedTensor(logits, 1, labels.length)) return unsupported;
+    const width = text.dims[1];
+    const prototypes = normalizedRows(text.data, labels.length, width), probe = normalizedRows(image.data, 1, width);
+    /* logits_per_image = logit_scale * image_embeds . text_embeds, so recover the scale by least
+       squares over the four pairs instead of trusting a hard-coded constant. */
+    const similarities = labels.map((_, label) => cosine(probe, 0, prototypes, label, width));
+    let numerator = 0, denominator = 0;
+    for (let label = 0; label < similarities.length; label++) { numerator += similarities[label] * logits.data[label]; denominator += similarities[label] * similarities[label]; }
+    if (!(denominator > 0)) return unsupported;
+    const scale = numerator / denominator;
+    if (!isFinite(scale) || scale <= 0) return unsupported;
+    const mine = softmax32(Float32Array.from(similarities, similarity => scale * similarity)), reference = softmax32(logits.data);
+    for (let label = 0; label < mine.length; label++) if (!(Math.abs(mine[label] - reference[label]) <= IMAGE_SCORE_TOLERANCE)) return unsupported;
+    /* Every later batch feeds a throwaway prompt, which is only sound because CLIP's towers are
+       independent. Prove that on this probe image rather than assuming it. */
+    const dummy = tokenize(['']);
+    const lean = await pipe.model(Object.assign({}, dummy, { pixel_values })); check(token);
+    if (!isEmbedTensor(lean[IMAGE_OUTPUTS.image], 1, width)) return unsupported;
+    const leanProbe = normalizedRows(lean[IMAGE_OUTPUTS.image].data, 1, width);
+    for (let column = 0; column < width; column++) if (!(Math.abs(leanProbe[column] - probe[column]) <= IMAGE_EMBED_TOLERANCE)) return unsupported;
+    return { labels, text: prototypes, width, scale, dummy, supported: true };
+  } catch (error) { if (isCancellation(error)) throw error; return unsupported; }
+}
+async function imageScores(pipe, raws, proto) {
+  const { pixel_values } = await pipe.processor(raws);
+  const out = await pipe.model(Object.assign({}, proto.dummy, { pixel_values }));
+  const embeds = out[IMAGE_OUTPUTS.image];
+  if (!isEmbedTensor(embeds, raws.length, proto.width)) { proto.supported = false; return null; }
+  const normalized = normalizedRows(embeds.data, raws.length, proto.width);
+  return raws.map((_, row) => rankImage(normalized, row, proto));
+}
+async function imageResults(pipe, raws, proto) {
+  if (proto && proto.supported) { const scores = await imageScores(pipe, raws, proto); if (scores) return scores; }
+  return arrayResult(await pipe(raws, IMAGE_LABELS.slice()), raws.length);
+}
 async function ensurePipelines(categories, imageEnabled, token) {
   const need = { toxicity: categories.includes('abuse'), text: categories.some(x => !['images', 'abuse'].includes(x)), image: imageEnabled };
   if (!need.toxicity && !need.text && !need.image) return { pipes: Object.assign({}, pipelines, { device: 'rules' }), duration: 0 };
@@ -78,7 +180,7 @@ async function ensurePipelines(categories, imageEnabled, token) {
   const t = await transformers(token);
   const preferred = rememberedWasm || !(typeof navigator !== 'undefined' && navigator.gpu) ? 'wasm' : 'webgpu';
   const createMissing = async device => {
-    if (pipelines.device && pipelines.device !== device) pipelines = { device: null, toxicity: null, text: null, image: null, textSupportsHandBatch: false, RawImage: t.RawImage };
+    if (pipelines.device && pipelines.device !== device) pipelines = { device: null, toxicity: null, text: null, image: null, textSupportsHandBatch: false, imageProto: null, RawImage: t.RawImage };
     pipelines.device = device; pipelines.RawImage = t.RawImage;
     let complete = 0;
     for (const key of ['toxicity', 'text', 'image']) if (need[key]) {
@@ -90,23 +192,49 @@ async function ensurePipelines(categories, imageEnabled, token) {
       if (key === 'text' && typeof pipelines[key].entailment_id === 'number' && typeof pipelines[key].contradiction_id === 'number') {
         pipelines.textSupportsHandBatch = true;
       }
+      if (key === 'image' && !pipelines.imageProto) pipelines.imageProto = await calibrateImagePrototypes(pipelines[key], pipelines.RawImage, token);
       complete++; progress(token, 'initialization', complete, total, 'Preparing screening models…');
     }
   };
   try { await createMissing(preferred); }
   catch (error) {
     if (preferred !== 'webgpu' || token.cancelled) throw error;
-    rememberedWasm = true; pipelines = { device: null, toxicity: null, text: null, image: null, textSupportsHandBatch: false, RawImage: t.RawImage };
+    rememberedWasm = true; pipelines = { device: null, toxicity: null, text: null, image: null, textSupportsHandBatch: false, imageProto: null, RawImage: t.RawImage };
     progress(token, 'initialization', 0, total, 'WebGPU unavailable for this model; retrying with WASM…');
     await createMissing('wasm');
   }
   return { pipes: pipelines, duration: elapsed(started) };
 }
+/* Image batches are prefetched, so more than one request can be outstanding and a response can
+   arrive for a request nobody is awaiting yet. Key the pending resolvers by a monotonic id that the
+   host echoes back, so a duplicate or late response can never resolve an already-settled promise
+   over buffers the host has since detached. */
 function askImages(names, token) {
-  return new Promise((resolve, reject) => {
-    token.imageResolve = resolve; token.imageReject = reject;
-    emit('image-batch-request', token.runId, { names });
+  const requestId = ++token.imageRequestSequence;
+  const promise = new Promise((resolve, reject) => {
+    token.imageRequests.set(requestId, { resolve, reject });
+    emit('image-batch-request', token.runId, { names, requestId });
   });
+  /* A prefetched request can be rejected by a cancel before anything awaits it; keep a handler
+     attached so that never surfaces as an unhandled rejection. Awaiting callers still see it. */
+  promise.catch(() => {});
+  return promise;
+}
+function settleImageRequest(token, requestId, buffers) {
+  /* A response with no request id comes from a host that predates the id (kept working on
+     purpose) and answers the oldest outstanding request; ids are monotonic so Map insertion
+     order is request order. An id that is not outstanding is a duplicate or a late reply to an
+     already-settled request, and is dropped. */
+  const key = requestId == null ? token.imageRequests.keys().next().value : requestId;
+  const pending = key === undefined ? undefined : token.imageRequests.get(key);
+  if (!pending) return;
+  token.imageRequests.delete(key);
+  pending.resolve(buffers);
+}
+function rejectImageRequests(token, error) {
+  const pending = [...token.imageRequests.values()];
+  token.imageRequests.clear();
+  for (const request of pending) request.reject(error);
 }
 function getCacheKey(model, text, label) {
   return `${model}:${text}:${label || ''}`;
@@ -202,55 +330,67 @@ async function analyse(data, token) {
   timings.text = elapsed(textStarted); check(token);
 
   const unanalysed = [], imageStarted = performance.now(), imageNames = data.scanImages && pipes.image ? [...attachmentOwners.keys()] : [];
-  const imageBatchSize = pipes.device === 'webgpu' ? 4 : 2;
-  for (let offset = 0; offset < imageNames.length;) {
-    check(token);
-    const names = imageNames.slice(offset, offset + imageBatchSize), buffers = await askImages(names, token); check(token);
-    const decoded = [];
-    for (let index = 0; index < names.length; index++) {
-      if (!buffers[index]) { unanalysed.push(names[index]); continue; }
-      try { decoded.push({ name: names[index], raw: await pipes.RawImage.fromBlob(new Blob([buffers[index]])) }); }
-      catch (error) { unanalysed.push(names[index]); }
+  const imageBatchSize = pipes.device === 'webgpu' ? 8 : 4;
+  check(token);
+  let inflight = imageNames.length ? askImages(imageNames.slice(0, imageBatchSize), token) : null;
+  try {
+    for (let offset = 0; offset < imageNames.length;) {
+      check(token);
+      const names = imageNames.slice(offset, offset + imageBatchSize);
+      const buffers = await inflight; inflight = null; check(token);
+      /* Ask for the next batch before decoding and running inference on this one, so the host's
+         ZIP inflate overlaps the model pass instead of following it. Depth one: at most one
+         request is outstanding, and the cancel path rejects it like any other. */
+      const next = imageNames.slice(offset + names.length, offset + names.length + imageBatchSize);
+      if (next.length) inflight = askImages(next, token);
+      const decoded = [];
+      for (let index = 0; index < names.length; index++) {
+        if (!buffers[index]) { unanalysed.push(names[index]); continue; }
+        try { decoded.push({ name: names[index], raw: await pipes.RawImage.fromBlob(new Blob([buffers[index]])) }); }
+        catch (error) { unanalysed.push(names[index]); }
+      }
+      if (decoded.length) {
+        const results = await SafeScheduler.batched(decoded, imageBatchSize, async batch => {
+          check(token);
+          try { return await imageResults(pipes.image, batch.map(x => x.raw), pipes.imageProto); }
+          catch (error) { if (batch.length > 1 || isCancellation(error)) throw error; unanalysed.push(batch[0].name); return [null]; }
+        }, null, isCancellation);
+        decoded.forEach((item, index) => {
+          for (const result of results[index] || []) if (result.label !== 'safe image' && result.score >= SafePolicy.THRESHOLDS.image) {
+            for (const owner of attachmentOwners.get(item.name) || []) findings.push({ messageId: owner.id, category: 'images', reason: `Image model: ${result.label}`, score: result.score, source: 'model', attachment: item.name, _messageIndex: owner.index, _phase: 3 });
+          }
+        });
+      }
+      offset += names.length; progress(token, 'image', offset, imageNames.length, `Screening images ${offset} of ${imageNames.length}…`);
     }
-    if (decoded.length) {
-      const results = await SafeScheduler.batched(decoded, imageBatchSize, async batch => {
-        check(token);
-        try { return arrayResult(await pipes.image(batch.map(x => x.raw), ['safe image', 'nudity or sexual content', 'graphic violence', 'drugs or weapons']), batch.length); }
-        catch (error) { if (batch.length > 1 || isCancellation(error)) throw error; unanalysed.push(batch[0].name); return [null]; }
-      }, null, isCancellation);
-      decoded.forEach((item, index) => {
-        for (const result of results[index] || []) if (result.label !== 'safe image' && result.score >= SafePolicy.THRESHOLDS.image) {
-          for (const owner of attachmentOwners.get(item.name) || []) findings.push({ messageId: owner.id, category: 'images', reason: `Image model: ${result.label}`, score: result.score, source: 'model', attachment: item.name, _messageIndex: owner.index, _phase: 3 });
-        }
-      });
-    }
-    offset += names.length; progress(token, 'image', offset, imageNames.length, `Screening images ${offset} of ${imageNames.length}…`);
-  }
+  } finally { inflight = null; rejectImageRequests(token, cancellation()); }
   timings.image = elapsed(imageStarted); timings.total = elapsed(totalStarted); check(token);
   const partialCoverage = englishOnly.length ? scannableGroups.some(group => !group.english) : false;
-  emit('complete', token.runId, { findings: SafePolicy.mergeFindings(SafeScheduler.ordered(findings)), unanalysed, partialCoverage, device: pipes.device, policyVersion: SafePolicy.VERSION, timings });
+  /* `imageFastPath` is a diagnostic: false means the cached-prototype guard rejected this model and
+     the run used the plain pipeline call, which is correct but slower. */
+  emit('complete', token.runId, { findings: SafePolicy.mergeFindings(SafeScheduler.ordered(findings)), unanalysed, partialCoverage, device: pipes.device, imageFastPath: !!(pipes.imageProto && pipes.imageProto.supported), policyVersion: SafePolicy.VERSION, timings });
 }
 
 onmessage = ({ data }) => {
   if (data.type === 'cancel') {
-    if (activeRun && (!data.runId || data.runId === activeRun.runId)) { activeRun.cancelled = true; if (activeRun.imageReject) activeRun.imageReject(cancellation()); activeRun.imageResolve = activeRun.imageReject = null; }
+    if (activeRun && (!data.runId || data.runId === activeRun.runId)) { activeRun.cancelled = true; rejectImageRequests(activeRun, cancellation()); }
     if (pendingRun && data.runId === pendingRun.runId) pendingRun = null;
     return;
   }
   if (data.type === 'image-batch-response') {
-    if (activeRun && data.runId === activeRun.runId && activeRun.imageResolve) { const resolve = activeRun.imageResolve; activeRun.imageResolve = activeRun.imageReject = null; resolve(data.buffers || []); }
+    if (activeRun && data.runId === activeRun.runId) settleImageRequest(activeRun, data.requestId, data.buffers || []);
     return;
   }
   if (data.type !== 'analyse') return;
   if (!activeRun) {
-    const token = { runId: data.runId, cancelled: false }; activeRun = token;
+    const token = { runId: data.runId, cancelled: false, imageRequests: new Map(), imageRequestSequence: 0 }; activeRun = token;
     analyse(data, token).catch(error => { if (!token.cancelled) emit('error', token.runId, { message: error.message || String(error), fatal: true }); }).finally(() => {
       if (token.cancelled) emit('cancelled', token.runId, {});
       if (activeRun === token) activeRun = null;
       if (pendingRun) { const next = pendingRun; pendingRun = null; self.postMessage(next); }
     });
   } else {
-    activeRun.cancelled = true; pendingRun = data; if (activeRun.imageReject) activeRun.imageReject(cancellation());
+    activeRun.cancelled = true; pendingRun = data; rejectImageRequests(activeRun, cancellation());
   }
 };
 emit('ready', null, { policyVersion: SafePolicy.VERSION, models: MODELS });

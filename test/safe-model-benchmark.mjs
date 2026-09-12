@@ -179,7 +179,7 @@ try {
       const id = ++runId, started = performance.now();
       worker.onmessage = event => {
         const data = event.data;
-        if (data.type === 'image-batch-request' && data.runId === id) worker.postMessage({ type: 'image-batch-response', runId: id, buffers: data.names.map(() => pixel.slice(0)) });
+        if (data.type === 'image-batch-request' && data.runId === id) worker.postMessage({ type: 'image-batch-response', runId: id, requestId: data.requestId, buffers: data.names.map(() => pixel.slice(0)) });
         else if (data.type === 'complete' && data.runId === id) {
           const wanted = new Set([...corpus.risky.rule, ...corpus.risky.model]), hits = new Map();
           for (const finding of data.findings) if (wanted.has(finding.messageId)) {
@@ -190,7 +190,7 @@ try {
             const flagged = corpus.risky[group].filter(messageId => hits.has(messageId));
             return { total: corpus.risky[group].length, flagged: flagged.length, rate: corpus.risky[group].length ? Math.round(flagged.length / corpus.risky[group].length * 100) / 100 : null, ids: Object.fromEntries(flagged.map(messageId => [messageId, [...hits.get(messageId)].sort()])) };
           };
-          resolve({ wall: Math.round(performance.now() - started), timings: data.timings, device: data.device, findings: data.findings.length, unanalysed: data.unanalysed.length, partialCoverage: data.partialCoverage, recall: { rule: record('rule'), model: record('model') } });
+          resolve({ wall: Math.round(performance.now() - started), timings: data.timings, device: data.device, imageFastPath: data.imageFastPath === undefined ? null : data.imageFastPath, findings: data.findings.length, unanalysed: data.unanalysed.length, partialCoverage: data.partialCoverage, recall: { rule: record('rule'), model: record('model') } });
         } else if (data.type === 'error' && data.runId === id) reject(new Error(data.message));
       };
       worker.postMessage({ type: 'analyse', runId: id, messages: corpus.messages, categories: ['abuse', 'sexual', 'violence', 'drugs', 'crime', ...(corpus.scanImages ? ['images'] : [])], customTerms: '', scanImages: !!corpus.scanImages });
@@ -208,7 +208,7 @@ try {
   };
   console.log(JSON.stringify(result, null, 2));
   for (const [name, sizes] of Object.entries(servedWasm)) console.log(`note: ${name} served gzipped (${sizes.raw} → ${sizes.gzip} bytes), matching GitHub Pages; timings.initialization is a cold download plus compile.`);
-  for (const [name, corpus] of Object.entries(result.corpora)) console.log(`${name}: wall ${corpus.wall} ms, init ${corpus.timings.initialization} ms, text ${corpus.timings.text} ms, image ${corpus.timings.image} ms, device ${corpus.device}, recall rule ${corpus.recall.rule.flagged}/${corpus.recall.rule.total} model ${corpus.recall.model.flagged}/${corpus.recall.model.total}`);
+  for (const [name, corpus] of Object.entries(result.corpora)) console.log(`${name}: wall ${corpus.wall} ms, init ${corpus.timings.initialization} ms, text ${corpus.timings.text} ms, image ${corpus.timings.image} ms, device ${corpus.device}, image fast path ${corpus.imageFastPath}, findings ${corpus.findings}, unanalysed ${corpus.unanalysed}, recall rule ${corpus.recall.rule.flagged}/${corpus.recall.rule.total} model ${corpus.recall.model.flagged}/${corpus.recall.model.total}`);
   const baselinePath = process.env.SAFE_BENCH_BASELINE_JSON;
   if (baselinePath && process.env.SAFE_BENCH_WRITE_BASELINE === '1') {
     await writeFile(baselinePath, `${JSON.stringify(result, null, 2)}\n`);
