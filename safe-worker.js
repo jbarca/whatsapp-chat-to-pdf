@@ -1,6 +1,6 @@
 /* Cancellable, entirely local Safe Mode inference worker. */
 'use strict';
-importScripts('safe-policy.js?v=1.1.0', 'safe-scheduler.js?v=1.1.0');
+importScripts('safe-policy.js?v=1.2.0', 'safe-scheduler.js?v=1.2.0');
 
 const MODELS = Object.freeze({
   toxicity: { task: 'text-classification', id: 'onnx-community/distilbert-multilingual-toxicity-classifier-ONNX', revision: '4fbaccee8caaba02641b1757f7ef697e3fbffdb8' },
@@ -9,8 +9,8 @@ const MODELS = Object.freeze({
 });
 let activeRun = null, pendingRun = null, transformersPromise = null, rememberedWasm = false;
 let pipelines = { device: null, toxicity: null, text: null, image: null, textSupportsHandBatch: false, imageProto: null, RawImage: null };
-let scoreCache = new Map(), cacheEpoch = '';
-const MAX_CACHE_ENTRIES = 200000, DTYPE = 'q8';
+let scoreCache = new Map(), cacheEpoch = '', cacheCharTotal = 0;
+const MAX_CACHE_ENTRIES = 200000, MAX_CACHE_CHARS = 8_000_000, DTYPE = 'q8';
 const nativeFetch = self.fetch.bind(self);
 const allowedModelPrefixes = Object.values(MODELS).map(model => `https://huggingface.co/${model.id}/resolve/${model.revision}/`);
 self.fetch = function guardedFetch(input, init) {
@@ -239,17 +239,31 @@ function rejectImageRequests(token, error) {
 function getCacheKey(model, text, label) {
   return `${model}:${text}:${label || ''}`;
 }
+// Shared by both read and write paths so an epoch change (model/policy/device) never leaves stale entries reachable from either side.
+function syncCacheEpoch() {
+  const epoch = getCacheEpoch();
+  if (cacheEpoch !== epoch) { scoreCache.clear(); cacheCharTotal = 0; cacheEpoch = epoch; }
+}
+function evictOldestCacheEntry() {
+  const oldestKey = scoreCache.keys().next().value;
+  cacheCharTotal -= oldestKey.length;
+  scoreCache.delete(oldestKey);
+}
 function getCachedScore(model, text, label) {
-  if (!text || cacheEpoch !== getCacheEpoch()) return undefined;
+  if (!text) return undefined;
+  syncCacheEpoch();
   const key = getCacheKey(model, text, label);
   return scoreCache.has(key) ? scoreCache.get(key) : undefined;
 }
 function setCachedScore(model, text, label, score) {
   if (!text) return;
-  const epoch = getCacheEpoch();
-  if (cacheEpoch !== epoch) { scoreCache.clear(); cacheEpoch = epoch; }
+  syncCacheEpoch();
   const key = getCacheKey(model, text, label);
-  if (!scoreCache.has(key) && scoreCache.size >= MAX_CACHE_ENTRIES) scoreCache.delete(scoreCache.keys().next().value);
+  if (!scoreCache.has(key)) {
+    // Keys embed full normalized message text; bound both entry count and total key bytes so the cache can't grow unbounded.
+    while (scoreCache.size > 0 && (scoreCache.size >= MAX_CACHE_ENTRIES || cacheCharTotal + key.length > MAX_CACHE_CHARS)) evictOldestCacheEntry();
+    cacheCharTotal += key.length;
+  }
   scoreCache.set(key, score);
 }
 function getCacheEpoch() {
@@ -268,9 +282,15 @@ async function analyse(data, token) {
   const loaded = await ensurePipelines(categories, !!data.scanImages, token);
   const pipes = loaded.pipes; timings.initialization = loaded.duration; check(token);
   const textStarted = performance.now(), batchSize = pipes.device === 'webgpu' ? 32 : 16;
-  const labels = categories.filter(x => x !== 'images').map(x => SafePolicy.LABELS[x]);
+  // abuse is already covered end-to-end by the multilingual toxicity model below; skip it in MNLI (unless toxicity is unavailable) to avoid ~20% wasted forward passes and a duplicate finding.
+  const labels = categories.filter(x => x !== 'images' && !(x === 'abuse' && pipes.toxicity)).map(x => SafePolicy.LABELS[x]);
   const englishOnly = categories.filter(x => x !== 'images' && x !== 'abuse');
   const scannableGroups = groups.filter(group => group.scannable);
+  const needsEnglish = !!(pipes.text && labels.length); // .english is lazy; read only if MNLI will use it
+  const englishGroups = needsEnglish ? scannableGroups.filter(group => group.english) : [];
+  // One running total across the toxicity and MNLI passes so the progress bar stays monotonic instead of resetting at the halfway point.
+  const toxicityCount = pipes.toxicity ? scannableGroups.length : 0;
+  const textTotal = toxicityCount + (needsEnglish ? englishGroups.length : 0);
   if (pipes.toxicity) {
     const cached = scannableGroups.map(group => getCachedScore('toxicity', group.key, ''));
     const pending = cached.flatMap((score, index) => score === undefined ? [index] : []), hits = scannableGroups.length - pending.length;
@@ -278,7 +298,7 @@ async function analyse(data, token) {
       const toxBucket = SafeScheduler.bucketed(pending, index => scannableGroups[index].text.length);
       const fresh = toxBucket.restore(await SafeScheduler.batched(toxBucket.items, batchSize, async batch => {
         check(token); return arrayResult(await pipes.toxicity(batch.map(index => scannableGroups[index].text), { top_k: null }), batch.length);
-      }, done => textProgress(token, hits + done, scannableGroups.length), isCancellation));
+      }, done => textProgress(token, hits + done, textTotal), isCancellation));
       pending.forEach((index, slot) => { cached[index] = fresh[slot]; setCachedScore('toxicity', scannableGroups[index].key, '', fresh[slot]); });
     }
     findings.push(...SafeScheduler.fanOut(scannableGroups, cached, result => (result || []).flatMap(item => {
@@ -286,7 +306,6 @@ async function analyse(data, token) {
       return category === 'abuse' && item.score >= SafePolicy.THRESHOLDS.text ? [{ category, reason: `Multilingual toxicity model: ${item.label}`, score: item.score, source: 'model', _phase: 1 }] : [];
     })));
   }
-  const englishGroups = scannableGroups.filter(group => group.english);
   if (pipes.text && labels.length) {
     let results;
     const cached = englishGroups.map(group => labels.map(label => getCachedScore('text', group.key, label)));
@@ -300,7 +319,7 @@ async function analyse(data, token) {
         const pairBucket = SafeScheduler.bucketed(pairs, pair => pair.premise.length);
         const scores = pairBucket.restore(await SafeScheduler.batched(pairBucket.items, batchSize, async batch => {
           check(token); return mnliScores(pipes.text, batch, 128);
-        }, done => textProgress(token, Math.floor((hitPairs + done) / labels.length), englishGroups.length), isCancellation));
+        }, done => textProgress(token, toxicityCount + Math.floor((hitPairs + done) / labels.length), textTotal), isCancellation));
         pairs.forEach((pair, slot) => { cached[pair.group][pair.label] = scores[slot]; setCachedScore('text', englishGroups[pair.group].key, labels[pair.label], scores[slot]); });
       }
       results = cached.map(scores => ({ labels: labels.slice(), scores }));
@@ -315,7 +334,7 @@ async function analyse(data, token) {
       if (pending.length) {
         const fresh = await SafeScheduler.batched(pending, batchSize, async batch => {
           check(token); return objectResult(await pipes.text(batch.map(index => englishGroups[index].text), labels, { multi_label: true }), batch.length);
-        }, done => textProgress(token, hits + done, englishGroups.length), isCancellation);
+        }, done => textProgress(token, toxicityCount + hits + done, textTotal), isCancellation);
         pending.forEach((index, slot) => {
           results[index] = fresh[slot];
           (fresh[slot].labels || []).forEach((label, l) => setCachedScore('text', englishGroups[index].key, label, fresh[slot].scores[l]));
@@ -343,12 +362,14 @@ async function analyse(data, token) {
          request is outstanding, and the cancel path rejects it like any other. */
       const next = imageNames.slice(offset + names.length, offset + names.length + imageBatchSize);
       if (next.length) inflight = askImages(next, token);
+      // Decode the batch concurrently instead of one-by-one; order is restored below and failures still fall through to unanalysed.
+      const decodedSlots = await Promise.all(names.map(async (name, index) => {
+        if (!buffers[index]) return null;
+        try { return { name, raw: await pipes.RawImage.fromBlob(new Blob([buffers[index]])) }; }
+        catch (error) { return null; }
+      }));
       const decoded = [];
-      for (let index = 0; index < names.length; index++) {
-        if (!buffers[index]) { unanalysed.push(names[index]); continue; }
-        try { decoded.push({ name: names[index], raw: await pipes.RawImage.fromBlob(new Blob([buffers[index]])) }); }
-        catch (error) { unanalysed.push(names[index]); }
-      }
+      decodedSlots.forEach((slot, index) => { if (slot) decoded.push(slot); else unanalysed.push(names[index]); });
       if (decoded.length) {
         const results = await SafeScheduler.batched(decoded, imageBatchSize, async batch => {
           check(token);
@@ -371,6 +392,16 @@ async function analyse(data, token) {
   emit('complete', token.runId, { findings: SafePolicy.mergeFindings(SafeScheduler.ordered(findings)), unanalysed, partialCoverage, device: pipes.device, imageFastPath: !!(pipes.imageProto && pipes.imageProto.supported), policyVersion: SafePolicy.VERSION, timings });
 }
 
+// Starts a run directly (not via postMessage/self.postMessage) so a queued pendingRun actually dispatches: postMessage from
+// inside a worker goes to the host, which ignores type:'analyse' and would otherwise hang the UI in "scanning" forever.
+function startRun(data) {
+  const token = { runId: data.runId, cancelled: false, imageRequests: new Map(), imageRequestSequence: 0 }; activeRun = token;
+  analyse(data, token).catch(error => { if (!token.cancelled) emit('error', token.runId, { message: error.message || String(error), fatal: true }); }).finally(() => {
+    if (token.cancelled) emit('cancelled', token.runId, {});
+    if (activeRun === token) activeRun = null;
+    if (pendingRun) { const next = pendingRun; pendingRun = null; startRun(next); }
+  });
+}
 onmessage = ({ data }) => {
   if (data.type === 'cancel') {
     if (activeRun && (!data.runId || data.runId === activeRun.runId)) { activeRun.cancelled = true; rejectImageRequests(activeRun, cancellation()); }
@@ -382,15 +413,7 @@ onmessage = ({ data }) => {
     return;
   }
   if (data.type !== 'analyse') return;
-  if (!activeRun) {
-    const token = { runId: data.runId, cancelled: false, imageRequests: new Map(), imageRequestSequence: 0 }; activeRun = token;
-    analyse(data, token).catch(error => { if (!token.cancelled) emit('error', token.runId, { message: error.message || String(error), fatal: true }); }).finally(() => {
-      if (token.cancelled) emit('cancelled', token.runId, {});
-      if (activeRun === token) activeRun = null;
-      if (pendingRun) { const next = pendingRun; pendingRun = null; self.postMessage(next); }
-    });
-  } else {
-    activeRun.cancelled = true; pendingRun = data; rejectImageRequests(activeRun, cancellation());
-  }
+  if (!activeRun) startRun(data);
+  else { activeRun.cancelled = true; pendingRun = data; rejectImageRequests(activeRun, cancellation()); }
 };
 emit('ready', null, { policyVersion: SafePolicy.VERSION, models: MODELS });

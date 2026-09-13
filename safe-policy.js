@@ -6,7 +6,7 @@
 })(typeof self !== 'undefined' ? self : globalThis, function () {
   'use strict';
 
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
   const THRESHOLDS = Object.freeze({ text: 0.30, image: 0.25 });
   const LABELS = Object.freeze({
     abuse: 'Abuse, hate, and threats', sexual: 'Sexual or explicit content',
@@ -37,15 +37,32 @@
     return haystack.includes(needle);
   }
   const NORMALIZED_RULES = Object.freeze(Object.fromEntries(Object.entries(RULES).map(([category, words]) => [category, words.map(normalize)])));
+  const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // One compiled alternation per category (built once): a single scan replaces ~6 `.includes()` calls per category per group.
+  // Still space-padded substrings, not `\b` — matches the exact "word" semantics `hasTerm`/the old loop used.
+  const CATEGORY_REGEX = Object.freeze(Object.fromEntries(Object.entries(NORMALIZED_RULES)
+    .map(([category, words]) => [category, new RegExp(` (?:${words.map(escapeRe).join('|')}) `)])));
+  let customRegexCache = { terms: null, regex: null }; // 1-entry memo: same terms array in => no recompile
+  function customRegexFor(terms) {
+    if (customRegexCache.terms === terms) return customRegexCache.regex;
+    const regex = terms && terms.length ? new RegExp(` (?:${terms.map(escapeRe).join('|')}) `) : null;
+    customRegexCache = { terms, regex };
+    return regex;
+  }
   function ruleFindingsNormalized(paddedHaystack, categories, terms) {
     const selected = new Set(categories || []), findings = [];
     for (const [category, words] of Object.entries(NORMALIZED_RULES)) {
-      if (!selected.has(category)) continue;
+      if (!selected.has(category) || !CATEGORY_REGEX[category].test(paddedHaystack)) continue;
+      // Regex only answers "did anything match"; re-resolve via declaration order so the reported
+      // phrase stays byte-identical to the old `words.find` (first-declared, not leftmost-in-text).
       const hit = words.find(word => paddedHaystack.includes(` ${word} `));
-      if (hit) findings.push({ category, reason: `Matched risk phrase: “${hit}”`, score: 1, source: 'rule' });
+      findings.push({ category, reason: `Matched risk phrase: “${hit}”`, score: 1, source: 'rule' });
     }
-    const custom = (terms || []).find(term => paddedHaystack.includes(` ${term} `));
-    if (custom) findings.push({ category: 'custom', reason: `Matched custom term: “${custom}”`, score: 1, source: 'custom' });
+    const customRegex = customRegexFor(terms);
+    if (customRegex && customRegex.test(paddedHaystack)) {
+      const custom = terms.find(term => paddedHaystack.includes(` ${term} `));
+      findings.push({ category: 'custom', reason: `Matched custom term: “${custom}”`, score: 1, source: 'custom' });
+    }
     return findings;
   }
   function ruleFindings(text, categories, terms) {

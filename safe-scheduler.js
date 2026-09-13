@@ -13,7 +13,17 @@
       const key = normalize(message.text);
       let group = byKey.get(key);
       if (!group) {
-        group = { text: message.text, key, english: classifyLanguage(message.text, key), scannable: isScannable(key), owners: [] };
+        group = { text: message.text, key, scannable: isScannable(key), owners: [] };
+        // `.english` is expensive (classifyLanguage runs a full \p{L} match) and only read for
+        // English-only categories on scannable groups — compute lazily, cache on first read.
+        Object.defineProperty(group, 'english', {
+          configurable: true, enumerable: true,
+          get() {
+            const value = classifyLanguage(message.text, key);
+            Object.defineProperty(group, 'english', { value, enumerable: true, configurable: true, writable: false });
+            return value;
+          },
+        });
         byKey.set(key, group); groups.push(group);
       }
       group.owners.push({ id: message.id, index });

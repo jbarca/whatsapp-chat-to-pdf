@@ -12,8 +12,9 @@ const normalize = text => String(text || '').toLowerCase().trim();
     { id: 5, text: 'deleted', deleted: true },
   ];
   const prepared = scheduler.preprocess(messages, (text, key) => { classifications++; return key !== 'hola'; }, key => key !== 'hola', normalize);
-  assert.equal(classifications, 2);
+  assert.equal(classifications, 0); // .english is lazy
   assert.deepEqual(prepared.groups.map(x => [x.text, x.owners.map(y => y.id), x.english, x.scannable]), [['same', [3, 1], true, true], ['hola', [2], false, false]]);
+  assert.equal(classifications, 2);
   assert.deepEqual([...prepared.attachmentOwners].map(([name, owners]) => [name, owners.map(x => x.id)]), [['a.jpg', [3, 1]], ['missing.jpg', [2]]]);
 
   const calls = [];
