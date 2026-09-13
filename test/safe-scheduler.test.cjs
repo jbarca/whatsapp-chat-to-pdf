@@ -60,5 +60,29 @@ const normalize = text => String(text || '').toLowerCase().trim();
   const bucketTagged = scheduler.bucketed(tagged, s => s.split('-')[0].length);
   assert.deepEqual(bucketTagged.items, ['a-1', 'a-0', 'bb-1', 'bb-0', 'bb-2', 'ccc-0']);
   assert.deepEqual(bucketTagged.restore(bucketTagged.items.map(s => s.toUpperCase())), tagged.map(s => s.toUpperCase()));
+  // appendAll must not blow the call stack the way `push(...source)` does at scale
+  // (safe-worker.js used to spread fanOut's output straight into findings.push).
+  const BIG = 200000;
+  const bigSource = new Array(BIG);
+  for (let i = 0; i < BIG; i++) bigSource[i] = i;
+  const bigTarget = ['seed'];
+  scheduler.appendAll(bigTarget, bigSource);
+  assert.equal(bigTarget.length, BIG + 1);
+  assert.equal(bigTarget[0], 'seed');
+  assert.equal(bigTarget[1], 0);
+  assert.equal(bigTarget[bigTarget.length - 1], BIG - 1);
+
+  // fanOut at the same scale: one group per owner so fanOut's returned array is BIG long,
+  // then appendAll must absorb it into findings without throwing.
+  const bigGroups = new Array(BIG);
+  for (let i = 0; i < BIG; i++) bigGroups[i] = { owners: [{ id: i, index: i }] };
+  const bigResults = new Array(BIG).fill(['flag']);
+  const bigFindings = scheduler.fanOut(bigGroups, bigResults, result => result.map(reason => ({ category: 'abuse', reason })));
+  const findingsTarget = [];
+  scheduler.appendAll(findingsTarget, bigFindings);
+  assert.equal(findingsTarget.length, BIG);
+  assert.equal(findingsTarget[0].messageId, 0);
+  assert.equal(findingsTarget[BIG - 1].messageId, BIG - 1);
+
   console.log('safe scheduler tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

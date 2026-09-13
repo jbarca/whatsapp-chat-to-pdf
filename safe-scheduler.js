@@ -55,7 +55,7 @@
           const batch = items.slice(offset, offset + size);
           const result = await invoke(batch);
           if (result.length !== batch.length) throw new Error(`batched: invoke returned ${result.length} results for a batch of ${batch.length}`);
-          output.push(...result); offset += size;
+          appendAll(output, result); offset += size;
           if (onBatch) onBatch(offset, items.length, size);
           break;
         } catch (error) {
@@ -65,6 +65,10 @@
       }
     }
     return output;
+  }
+  function appendAll(target, source) {
+    for (let i = 0; i < source.length; i++) target.push(source[i]);
+    return target;
   }
   function fanOut(groups, results, makeFindings) {
     const findings = [];
@@ -79,5 +83,5 @@
       (a.finding._messageIndex - b.finding._messageIndex) || ((a.finding._phase || 0) - (b.finding._phase || 0)) || a.sequence - b.sequence
     ).map(({ finding }) => { const clean = Object.assign({}, finding); delete clean._messageIndex; delete clean._phase; return clean; });
   }
-  return { preprocess, batched, bucketed, fanOut, ordered };
+  return { preprocess, batched, bucketed, fanOut, ordered, appendAll };
 });

@@ -20,10 +20,10 @@ Pro unlock = Gumroad license key verified client-side (`api.gumroad.com/v2/licen
 - Verified 2026-09-07: free = 100 msgs + watermark (8-page PDF for sample); Pro evidence mode = all 351 numbered + SHA-256 cover (40 pages).
 
 ## Safe mode (client-side scanning: safe-worker.js + safe-policy.js + safe-scheduler.js)
-- Cache-buster (2026-09-12): `safe-worker.js` (`importScripts`), `index.html`'s
-  `<script src="safe-policy.js">`, and `app.js`'s `new Worker(...)` all carry a manual
-  `?v=` cache-buster (currently `1.2.0`) matching `SafePolicy.VERSION` in `safe-policy.js`.
-  Bump all four literals together whenever `safe-policy.js`/`safe-scheduler.js` changes —
+- Cache-buster (2026-09-12): `safe-worker.js` (`importScripts` for both safe-policy.js and safe-scheduler.js), `index.html`'s
+  `<script src="safe-policy.js">`, and `app.js`'s `new Worker(...)` carry a manual
+  `?v=` cache-buster (currently `1.2.1`; five literals total) matching `SafePolicy.VERSION` in `safe-policy.js`.
+  Bump all five together whenever `safe-policy.js`/`safe-scheduler.js` changes —
   Chrome caches Worker scripts and their `importScripts` far more aggressively than normal
   page assets, so without this a client can end up running a new `safe-worker.js` against a
   stale `safe-policy.js` (symptom seen: "Safe mode failed: isScannable is not a function"
@@ -55,6 +55,7 @@ Pro unlock = Gumroad license key verified client-side (`api.gumroad.com/v2/licen
   attachment; needs a stable cache key since filenames aren't reliable across files.
   `mnliScores`' batched path hardcodes `max_length: 128`; the non-batched fallback path uses
   the pipeline default, so long messages can score differently between the two paths.
+- Stack-overflow fix (2026-09-13, v1.2.1): never use function-call spread `arr.push(...big)` on arrays scaling with message count. It throws `RangeError: Maximum call stack size exceeded` past ~125k elements (UI: "Safe mode failed: Maximum call stack size exceeded"). Affected safe-worker.js:304/:344 (toxicity/MNLI passes) where `SafeScheduler.fanOut` returns findings per (group item × group owner). At threshold 0.3, MNLI flags >=1 label on 63.7% of groups, so 30k-message unlimited export blows the limit. Use `SafeScheduler.appendAll(target, source)` instead (safe-scheduler.js); `batched()` uses it too. Array-literal spread `[...iterable]` is fine. Regression: 200k-element test in test/safe-scheduler.test.cjs.
 
 ## Gotchas
 - `[hidden]{display:none!important}` is required because `.app{display:grid}` otherwise overrides the attribute.

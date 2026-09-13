@@ -6,7 +6,7 @@
 })(typeof self !== 'undefined' ? self : globalThis, function () {
   'use strict';
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
   const THRESHOLDS = Object.freeze({ text: 0.30, image: 0.25 });
   const LABELS = Object.freeze({
     abuse: 'Abuse, hate, and threats', sexual: 'Sexual or explicit content',

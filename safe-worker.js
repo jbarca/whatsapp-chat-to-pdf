@@ -1,6 +1,6 @@
 /* Cancellable, entirely local Safe Mode inference worker. */
 'use strict';
-importScripts('safe-policy.js?v=1.2.0', 'safe-scheduler.js?v=1.2.0');
+importScripts('safe-policy.js?v=1.2.1', 'safe-scheduler.js?v=1.2.1');
 
 const MODELS = Object.freeze({
   toxicity: { task: 'text-classification', id: 'onnx-community/distilbert-multilingual-toxicity-classifier-ONNX', revision: '4fbaccee8caaba02641b1757f7ef697e3fbffdb8' },
@@ -301,7 +301,7 @@ async function analyse(data, token) {
       }, done => textProgress(token, hits + done, textTotal), isCancellation));
       pending.forEach((index, slot) => { cached[index] = fresh[slot]; setCachedScore('toxicity', scannableGroups[index].key, '', fresh[slot]); });
     }
-    findings.push(...SafeScheduler.fanOut(scannableGroups, cached, result => (result || []).flatMap(item => {
+    SafeScheduler.appendAll(findings, SafeScheduler.fanOut(scannableGroups, cached, result => (result || []).flatMap(item => {
       const category = categoryForLabel(item.label);
       return category === 'abuse' && item.score >= SafePolicy.THRESHOLDS.text ? [{ category, reason: `Multilingual toxicity model: ${item.label}`, score: item.score, source: 'model', _phase: 1 }] : [];
     })));
@@ -341,7 +341,7 @@ async function analyse(data, token) {
         });
       }
     }
-    findings.push(...SafeScheduler.fanOut(englishGroups, results, result => (result.labels || []).flatMap((label, index) => {
+    SafeScheduler.appendAll(findings, SafeScheduler.fanOut(englishGroups, results, result => (result.labels || []).flatMap((label, index) => {
       const category = categoryForLabel(label);
       return category && result.scores[index] >= SafePolicy.THRESHOLDS.text ? [{ category, reason: `Text model: ${label}`, score: result.scores[index], source: 'model', _phase: 2 }] : [];
     })));

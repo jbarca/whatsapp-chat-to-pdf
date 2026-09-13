@@ -209,7 +209,7 @@
     state.safe.status = 'scanning'; state.safe.activeRunId = runId;
     els.safeAnalyse.disabled = true; els.safeCancel.hidden = false; els.safeCancel.disabled = false;
     els.safeStatus.textContent = `Preparing to screen ${messages.length.toLocaleString()} messages…`;
-    const worker = state.safe.worker || new Worker('safe-worker.js?v=1.2.0'); state.safe.worker = worker;
+    const worker = state.safe.worker || new Worker('safe-worker.js?v=1.2.1'); state.safe.worker = worker;
     let sent = false;
     const send = () => {
       if (sent || state.safe.worker !== worker || state.safe.activeRunId !== runId) return;
